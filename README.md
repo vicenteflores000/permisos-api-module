@@ -19,14 +19,20 @@ Microservicio desarrollado en **Laravel** para la gestión integral y trazabilid
 ## 🗄️ Estructura de Base de Datos
 
 ### 1. `permisos_saldos`
-Control de días administrativos disponibles por funcionario y año calendario.
+Control de saldos disponibles por funcionario, año calendario y tipo de permiso:
 - `id` (PK)
 - `insamu_user_id` (string 64, index)
 - `anio` (unsignedSmallInteger)
-- `dias_totales` (decimal 4,1 - default 6.0)
-- `dias_usados` (decimal 4,1 - default 0.0)
-- *Restricción única:* `(insamu_user_id, anio)`
-- *Campo virtual:* `dias_disponibles = dias_totales - dias_usados`
+- `tipo_permiso` (`administrativo`, `feriado_legal`, `compensacion_tiempo`)
+- `unidad` (`dias` o `horas`)
+- `dias_totales` (decimal 6,2 - cantidad total asignada o acumulada)
+- `dias_usados` (decimal 6,2 - cantidad consumida)
+- *Restricción única:* `(insamu_user_id, anio, tipo_permiso)`
+- *Campo virtual:* `cantidad_disponible = dias_totales - dias_usados`
+- *Valores por defecto anuales:*
+  - **Permisos Administrativos:** 6.0 días.
+  - **Feriados Legales (Vacaciones):** 15.0 días.
+  - **Compensación de Tiempo:** 0.0 horas iniciales (se incrementan con horas extra).
 
 ### 2. `permisos_solicitudes`
 Registro maestro de solicitudes de permiso.
@@ -131,10 +137,59 @@ Si el encabezado no coincide con el valor de `API_SECRET_KEY` configurado en el 
   - Si el firmante fue subrogante, indica explícitamente:
     > *"[Cargo] Subrogante"*
 
-### 5. Saldos y Auditoría
-- **Consultar Saldo**: `GET /api/saldos/{userId}?anio=2026`
+### 5. Módulo "Gestor de Saldos" para Recursos Humanos
+- **Interfaz Web RRHH**: `GET /rrhh/gestor-saldos`
+  - Vista exclusiva para RRHH con submódulos de **Inicialización de Permisos** (individual y Drag & Drop CSV para todo el CESFAM), **Abono de Compensaciones** e interfaz interactiva con **Bloqueo Preventivo**.
+- **Descargar Plantilla CSV**: `GET /rrhh/plantilla-saldos.csv`
+  - Descarga planilla formateada con columnas `insamu_user_id,anio,dias_feriado_legal,horas_compensacion`.
+- **Inicializar Saldos Individual (Feriado Legal & Compensación)**: `POST /api/rrhh/saldos/inicializar`
+  - Permite a RRHH fijar topes anuales variables de Feriado Legal (ej. 15, 20 o 25 días según antigüedad) y saldo inicial de compensación.
+- **Carga Masiva de Planilla**: `POST /api/rrhh/saldos/carga-masiva`
+  - Procesa planillas masivas del CESFAM/DESAM vía archivo CSV (Drag & Drop) o array de objetos JSON para Feriado Legal y Compensación.
+- **Inyección Transaccional de Compensación**: `POST /api/rrhh/saldos/inyectar-compensacion`
+  - Suma acumulativamente las horas a favor por turnos extraordinarios (sin sobrescribir) y audita al usuario de RRHH en `logs_sistema`.
+- **Verificación y Bloqueo Preventivo**: `GET /api/saldos/{userId}/verificar?tipo_permiso=...&anio=...`
+  - Evalúa si el funcionario tiene saldo configurado. Si no está inicializado, reporta `bloqueo_preventivo: true` con el mensaje oficial para bloquear el formulario.
+- **Consultar Saldos**: `GET /api/saldos/{userId}?anio=2026`
 - **Configurar / Ajustar Saldo**: `POST /api/saldos`
 - **Consultar Logs de Auditoría**: `GET /api/logs`
+
+---
+
+### 6. Automatización de Días Administrativos (Cron Job & Vencimiento Estricto)
+
+- **Comando Artisan**:
+  ```bash
+  php artisan permisos:asignar-administrativos-anuales [--anio=2027] [--user=MEDICO-01]
+  ```
+- **Task Scheduling (Programador de Tareas)**:
+  - Ejecución programada en `routes/console.php`:
+    ```php
+    Schedule::command('permisos:asignar-administrativos-anuales')
+        ->yearlyOn(1, 1, '00:00');
+    ```
+    (Expresión Cron: `0 0 1 1 *`).
+- **Lógica de Asignación y Caducidad**:
+  - Cada **1 de enero a las 00:00**, asigna exactamente **6.0 días totales** y **0.0 días usados** a todos los funcionarios activos.
+  - **Vencimiento Estricto al 31 de Diciembre**: El saldo del año anterior caduca indefectiblemente. Los días no utilizados **no se traspasan ni se suman** a los 6 nuevos del año siguiente.
+### 7. Gestión de Archivos Adjuntos (Storage Seguro)
+
+- **Cálculo Simple de Fechas**:
+  - Se descarta la integración de calendarios de feriados nacionales. La API confía plenamente en `dias_solicitados` (o `horas_solicitadas`) enviado por el cliente y lo descuenta de forma lineal del saldo del funcionario.
+- **Validación Condicional de Adjuntos**:
+  - En la creación de la solicitud (`POST /api/permisos`), el campo `archivo` es `nullable` por defecto.
+  - Pasa a ser estrictamente **`required`** si `tipo_permiso` corresponde a:
+    - `fallecimiento_familiar` (Certificado de defunción)
+    - `nacimiento_hijo` (Certificado de nacimiento)
+    - `capacitacion_autogestionada` (Certificado de curso / asistencia)
+- **Seguridad y Renombrado**:
+  - Los archivos subidos se renombran automáticamente con identificadores únicos **UUID** (`adjunto_{uuid}.{extension}`) en carpetas temporales/mensuales (`adjuntos_permisos/YYYY/MM`), previniendo ataques de Path Traversal o colisiones de nombre.
+  - Se valida tipo MIME (`pdf, jpg, jpeg, png, doc, docx`) y tamaño máximo (10 MB).
+  - La ruta se almacena en la columna `archivo_adjunto_url` de la tabla `permisos_solicitudes`.
+- **Endpoints de Adjuntos**:
+  - **Subida en Creación**: `POST /api/permisos` (enviar como `multipart/form-data` con campo `archivo`).
+  - **Subida / Actualización Dedicada**: `POST /api/permisos/{id}/adjunto` (actualiza el adjunto de la solicitud existente).
+  - **Descarga / Visualización Segura**: `GET /api/permisos/{id}/adjunto` (sirve el archivo con las cabeceras MIME correspondientes; opcional `?download=1`).
 
 ---
 
@@ -143,8 +198,8 @@ Si el encabezado no coincide con el valor de `API_SECRET_KEY` configurado en el 
 El proyecto cuenta con un suite completo de pruebas unitarias y de integración en PHPUnit que validan cada requerimiento:
 
 ```bash
-php artisan test --testdox
+php artisan test
 ```
 
 Resultado:
-- **14 pruebas completas**, **83 aserciones**, 100% de éxito.
+- **24 pruebas completas**, **170 aserciones**, 100% de éxito.

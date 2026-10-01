@@ -22,7 +22,7 @@ class RrhhController extends Controller
     {
         $solicitud = PermisoSolicitud::find($id);
 
-        if (!$solicitud) {
+        if (! $solicitud) {
             return response()->json([
                 'status' => 'error',
                 'message' => "Solicitud #{$id} no encontrada.",
@@ -59,7 +59,7 @@ class RrhhController extends Controller
     {
         $solicitud = PermisoSolicitud::find($id);
 
-        if (!$solicitud) {
+        if (! $solicitud) {
             return response()->json([
                 'status' => 'error',
                 'message' => "Solicitud #{$id} no encontrada.",
@@ -94,7 +94,7 @@ class RrhhController extends Controller
     {
         $solicitud = PermisoSolicitud::find($id);
 
-        if (!$solicitud) {
+        if (! $solicitud) {
             return response()->json([
                 'status' => 'error',
                 'message' => "Solicitud #{$id} no encontrada.",

@@ -74,7 +74,7 @@ class FirmaController extends Controller
             ->where('token_correo', $token)
             ->first();
 
-        if (!$firma) {
+        if (! $firma) {
             return response()->json([
                 'status' => 'error',
                 'valido' => false,

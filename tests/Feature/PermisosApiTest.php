@@ -2,11 +2,14 @@
 
 namespace Tests\Feature;
 
-use App\Models\LogSistema;
 use App\Models\PermisoSaldo;
 use App\Models\PermisoSolicitud;
 use App\Models\PermisoTrazabilidadFirma;
+use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 class PermisosApiTest extends TestCase
@@ -44,7 +47,7 @@ class PermisosApiTest extends TestCase
             ->assertJsonPath('status', 'online');
 
         // 4. Con Authorization Bearer válido -> 200
-        $response = $this->withHeaders(['Authorization' => 'Bearer ' . $this->apiKey])
+        $response = $this->withHeaders(['Authorization' => 'Bearer '.$this->apiKey])
             ->getJson('/api/ping');
         $response->assertStatus(200);
     }
@@ -538,16 +541,16 @@ class PermisosApiTest extends TestCase
         $html = view('pdf.permiso', ['solicitud' => $solicitud])->render();
 
         // Verificar glosa para firma 1
-        $glosaEsperada1 = "Documento firmado electrónicamente mediante autenticación de PIN en INSAMU por Dra. Andrea Jefa, RUT 10.111.222-3 con fecha 01/12/2026 a las 10:15.";
+        $glosaEsperada1 = 'Documento firmado electrónicamente mediante autenticación de PIN en INSAMU por Dra. Andrea Jefa, RUT 10.111.222-3 con fecha 01/12/2026 a las 10:15.';
         $this->assertStringContainsString($glosaEsperada1, $html);
-        $this->assertStringContainsString("Jefa de Urgencias", $html);
+        $this->assertStringContainsString('Jefa de Urgencias', $html);
 
         // Verificar glosa para firma 2 (Subrogante)
-        $glosaEsperada2 = "Documento firmado electrónicamente mediante autenticación de PIN en INSAMU por Dr. Roberto Subrogante, RUT 12.333.444-5 con fecha 01/12/2026 a las 11:30.";
+        $glosaEsperada2 = 'Documento firmado electrónicamente mediante autenticación de PIN en INSAMU por Dr. Roberto Subrogante, RUT 12.333.444-5 con fecha 01/12/2026 a las 11:30.';
         $this->assertStringContainsString($glosaEsperada2, $html);
 
         // Verificar que diga explícitamente "[Cargo] Subrogante"
-        $this->assertStringContainsString("Director de Hospital Subrogante", $html);
+        $this->assertStringContainsString('Director de Hospital Subrogante', $html);
 
         // Verificar que se haya registrado el log de descarga
         $this->assertDatabaseHas('logs_sistema', [
@@ -640,5 +643,466 @@ class PermisosApiTest extends TestCase
             ->getJson("/api/logs?entidad_id={$solicitud->id}");
         $logsRes->assertStatus(200)
             ->assertJsonPath('status', 'success');
+    }
+
+    /**
+     * Valida la inicialización individual de saldos por RRHH (Feriado Legal y opcional Compensación).
+     */
+    public function test_rrhh_inicializacion_individual_de_saldos(): void
+    {
+        $payload = [
+            'insamu_user_id' => 'USR_RRHH_INDIV',
+            'anio' => 2026,
+            'dias_feriado_legal' => 20.0,
+            'horas_compensacion' => 8.5,
+            'insamu_rrhh_user_id' => 'RRHH_OFFICER_01',
+        ];
+
+        $response = $this->withHeaders($this->headers())
+            ->postJson('/api/rrhh/saldos/inicializar', $payload);
+
+        $response->assertStatus(200)
+            ->assertJsonPath('status', 'success');
+
+        $this->assertDatabaseHas('permisos_saldos', [
+            'insamu_user_id' => 'USR_RRHH_INDIV',
+            'anio' => 2026,
+            'tipo_permiso' => PermisoSaldo::TIPO_FERIADO_LEGAL,
+            'dias_totales' => 20.0,
+            'unidad' => PermisoSaldo::UNIDAD_DIAS,
+        ]);
+
+        $this->assertDatabaseHas('permisos_saldos', [
+            'insamu_user_id' => 'USR_RRHH_INDIV',
+            'anio' => 2026,
+            'tipo_permiso' => PermisoSaldo::TIPO_COMPENSACION_TIEMPO,
+            'dias_totales' => 8.5,
+            'unidad' => PermisoSaldo::UNIDAD_HORAS,
+        ]);
+
+        $this->assertDatabaseHas('logs_sistema', [
+            'accion' => 'INICIALIZACION_SALDOS_INDIVIDUAL',
+            'insamu_user_id' => 'RRHH_OFFICER_01',
+        ]);
+    }
+
+    /**
+     * Valida la carga masiva de saldos por RRHH vía JSON y archivo CSV.
+     */
+    public function test_rrhh_carga_masiva_via_json_y_csv(): void
+    {
+        // 1. Carga masiva mediante JSON
+        $payloadJson = [
+            'insamu_rrhh_user_id' => 'RRHH_BULK',
+            'saldos' => [
+                [
+                    'insamu_user_id' => 'USR_MASS_1',
+                    'anio' => 2026,
+                    'dias_feriado_legal' => 15.0,
+                    'horas_compensacion' => 4.0,
+                ],
+                [
+                    'insamu_user_id' => 'USR_MASS_2',
+                    'anio' => 2026,
+                    'dias_feriado_legal' => 25.0,
+                    'horas_compensacion' => 0.0,
+                ],
+            ],
+        ];
+
+        $resJson = $this->withHeaders($this->headers())
+            ->postJson('/api/rrhh/saldos/carga-masiva', $payloadJson);
+
+        $resJson->assertStatus(200)
+            ->assertJsonPath('status', 'success')
+            ->assertJsonPath('resumen.total_procesados', 2);
+
+        $this->assertDatabaseHas('permisos_saldos', [
+            'insamu_user_id' => 'USR_MASS_1',
+            'tipo_permiso' => PermisoSaldo::TIPO_FERIADO_LEGAL,
+            'dias_totales' => 15.0,
+        ]);
+        $this->assertDatabaseHas('permisos_saldos', [
+            'insamu_user_id' => 'USR_MASS_2',
+            'tipo_permiso' => PermisoSaldo::TIPO_FERIADO_LEGAL,
+            'dias_totales' => 25.0,
+        ]);
+
+        // 2. Carga masiva mediante archivo CSV
+        $csvContent = "insamu_user_id,anio,dias_feriado_legal,horas_compensacion\n"
+                    ."CSV_USER_A,2026,15.0,2.5\n"
+                    ."CSV_USER_B,2026,20.0,6.0\n";
+
+        $csvFile = UploadedFile::fake()->createWithContent('planilla_saldos.csv', $csvContent);
+
+        $resCsv = $this->withHeaders($this->headers())
+            ->post('/api/rrhh/saldos/carga-masiva', [
+                'archivo_csv' => $csvFile,
+                'anio_defecto' => 2026,
+                'insamu_rrhh_user_id' => 'RRHH_CSV_ADMIN',
+            ]);
+
+        $resCsv->assertStatus(200)
+            ->assertJsonPath('status', 'success')
+            ->assertJsonPath('resumen.total_procesados', 2);
+
+        $this->assertDatabaseHas('permisos_saldos', [
+            'insamu_user_id' => 'CSV_USER_A',
+            'tipo_permiso' => PermisoSaldo::TIPO_FERIADO_LEGAL,
+            'dias_totales' => 15.0,
+        ]);
+        $this->assertDatabaseHas('permisos_saldos', [
+            'insamu_user_id' => 'CSV_USER_B',
+            'tipo_permiso' => PermisoSaldo::TIPO_COMPENSACION_TIEMPO,
+            'dias_totales' => 6.0,
+        ]);
+    }
+
+    /**
+     * Valida la inyección mensual transaccional de compensación de tiempo (acumulativo).
+     */
+    public function test_rrhh_inyectar_compensacion_transaccional(): void
+    {
+        $payload1 = [
+            'insamu_user_id' => 'USR_COMP_EXTRA',
+            'anio' => 2026,
+            'horas' => 5.5,
+            'motivo' => 'Turno de noche sábado',
+            'insamu_rrhh_user_id' => 'RRHH_JEFE_TURNO',
+        ];
+
+        $res1 = $this->withHeaders($this->headers())
+            ->postJson('/api/rrhh/saldos/inyectar-compensacion', $payload1);
+
+        $res1->assertStatus(200)
+            ->assertJsonPath('status', 'success')
+            ->assertJsonPath('data.dias_totales', 5.5);
+
+        // Segunda inyección mensual debe sumarse transaccionalmente sin sobrescribir
+        $payload2 = [
+            'insamu_user_id' => 'USR_COMP_EXTRA',
+            'anio' => 2026,
+            'horas' => 3.0,
+            'motivo' => 'Turno de refuerzo festivo',
+            'insamu_rrhh_user_id' => 'RRHH_JEFE_TURNO',
+        ];
+
+        $res2 = $this->withHeaders($this->headers())
+            ->postJson('/api/rrhh/saldos/inyectar-compensacion', $payload2);
+
+        $res2->assertStatus(200)
+            ->assertJsonPath('status', 'success')
+            ->assertJsonPath('data.dias_totales', 8.5)
+            ->assertJsonPath('data.dias_disponibles', 8.5);
+
+        $this->assertDatabaseHas('logs_sistema', [
+            'accion' => 'INYECCION_COMPENSACION_RRHH',
+            'insamu_user_id' => 'RRHH_JEFE_TURNO',
+        ]);
+    }
+
+    /**
+     * Valida el bloqueo preventivo y la validación estricta de cupo sin valores fijos.
+     */
+    public function test_bloqueo_preventivo_y_validacion_estricta_de_cupo(): void
+    {
+        // 1. Consultar estado sin haber inicializado el saldo
+        $verificarRes = $this->withHeaders($this->headers())
+            ->getJson('/api/saldos/USR_BLOQUEO/verificar?anio=2026&tipo_permiso=feriado_legal');
+
+        $verificarRes->assertStatus(200)
+            ->assertJsonPath('data.configurado', false)
+            ->assertJsonPath('data.bloqueo_preventivo', true)
+            ->assertJsonPath('data.mensaje', 'Saldo anual no configurado. Por favor, regularice su situación con Recursos Humanos antes de solicitar este permiso.');
+
+        // 2. Intentar solicitar permiso sin tener saldo configurado debe ser bloqueado con 422
+        $solicitudPayload = [
+            'insamu_user_id' => 'USR_BLOQUEO',
+            'tipo_permiso' => 'Feriado Legal',
+            'fecha_inicio' => '2026-11-01',
+            'fecha_fin' => '2026-11-05',
+            'dias_solicitados' => 5.0,
+            'insamu_visador_id' => 'VIS_01',
+        ];
+
+        $crearRes = $this->withHeaders($this->headers())
+            ->postJson('/api/permisos', $solicitudPayload);
+
+        $crearRes->assertStatus(422)
+            ->assertJsonPath('errors.saldo.0', 'Saldo anual no configurado. Por favor, regularice su situación con Recursos Humanos antes de solicitar este permiso.');
+
+        // 3. Inicializar saldo por RRHH y comprobar que el bloqueo preventivo se desactiva
+        $this->withHeaders($this->headers())
+            ->postJson('/api/rrhh/saldos/inicializar', [
+                'insamu_user_id' => 'USR_BLOQUEO',
+                'anio' => 2026,
+                'dias_feriado_legal' => 15.0,
+            ]);
+
+        $verificarPostRes = $this->withHeaders($this->headers())
+            ->getJson('/api/saldos/USR_BLOQUEO/verificar?anio=2026&tipo_permiso=feriado_legal');
+
+        $verificarPostRes->assertStatus(200)
+            ->assertJsonPath('data.configurado', true)
+            ->assertJsonPath('data.bloqueo_preventivo', false)
+            ->assertJsonPath('data.mensaje', null);
+        $this->assertEquals(15.0, $verificarPostRes->json('data.cantidad_disponible'));
+
+        // 4. Ahora sí permite crear la solicitud y descuenta el saldo
+        $crearExitoRes = $this->withHeaders($this->headers())
+            ->postJson('/api/permisos', $solicitudPayload);
+
+        $crearExitoRes->assertStatus(201);
+        $this->assertEquals(10.0, PermisoSaldo::where('insamu_user_id', 'USR_BLOQUEO')->where('anio', 2026)->where('tipo_permiso', PermisoSaldo::TIPO_FERIADO_LEGAL)->first()->cantidad_disponible);
+    }
+
+    /**
+     * Valida el Cron Job de asignación anual de días administrativos (yearlyOn(1, 1, '00:00'))
+     * y el vencimiento estricto al 31 de diciembre sin acumulación ni traspaso.
+     */
+    public function test_cron_asignar_administrativos_anuales_y_vencimiento_estricto(): void
+    {
+        // 1. Verificar configuración del Task Scheduler: yearlyOn(1, 1, '00:00') -> '0 0 1 1 *'
+        $schedule = app(Schedule::class);
+        $eventos = collect($schedule->events());
+        $eventoCron = $eventos->first(fn ($e) => str_contains($e->command, 'permisos:asignar-administrativos-anuales'));
+
+        $this->assertNotNull($eventoCron, 'El comando permisos:asignar-administrativos-anuales debe estar programado en el Scheduler');
+        $this->assertEquals('0 0 1 1 *', $eventoCron->expression);
+
+        // 2. Simular funcionarios activos en el sistema
+        PermisoSaldo::create([
+            'insamu_user_id' => 'DOC_ACTIVO_1',
+            'anio' => 2026,
+            'tipo_permiso' => PermisoSaldo::TIPO_FERIADO_LEGAL,
+            'dias_totales' => 15.0,
+        ]);
+        PermisoSaldo::create([
+            'insamu_user_id' => 'DOC_ACTIVO_2',
+            'anio' => 2026,
+            'tipo_permiso' => PermisoSaldo::TIPO_ADMINISTRATIVO,
+            'dias_totales' => 6.0,
+            'dias_usados' => 2.0, // le sobraron 4 días en 2026
+        ]);
+
+        // 3. Ejecutar comando de asignación anual automática para el año 2027
+        $exitCode = Artisan::call('permisos:asignar-administrativos-anuales', [
+            '--anio' => 2027,
+        ]);
+        $this->assertEquals(0, $exitCode);
+
+        // 4. Verificar que se crearon registros de saldo para 2027 con exactamente 6 días totales y 0 usados
+        $saldo2027User1 = PermisoSaldo::where('insamu_user_id', 'DOC_ACTIVO_1')
+            ->where('anio', 2027)
+            ->where('tipo_permiso', PermisoSaldo::TIPO_ADMINISTRATIVO)
+            ->first();
+
+        $this->assertNotNull($saldo2027User1);
+        $this->assertEquals(6.0, $saldo2027User1->dias_totales);
+        $this->assertEquals(0.0, $saldo2027User1->dias_usados);
+        $this->assertEquals(6.0, $saldo2027User1->dias_disponibles);
+
+        // 5. Vencimiento estricto: Los 4 días sobrantes de 2026 de DOC_ACTIVO_2 NO se traspasan ni se suman a 2027
+        $saldo2027User2 = PermisoSaldo::where('insamu_user_id', 'DOC_ACTIVO_2')
+            ->where('anio', 2027)
+            ->where('tipo_permiso', PermisoSaldo::TIPO_ADMINISTRATIVO)
+            ->first();
+
+        $this->assertNotNull($saldo2027User2);
+        $this->assertEquals(6.0, $saldo2027User2->dias_totales, 'Los días del año anterior no se suman a los 6 nuevos');
+        $this->assertEquals(0.0, $saldo2027User2->dias_usados);
+
+        // 6. Auditoría generada por el Cron Job
+        $this->assertDatabaseHas('logs_sistema', [
+            'accion' => 'ASIGNACION_AUTOMATICA_ADMINISTRATIVOS_ANUAL',
+            'insamu_user_id' => 'SISTEMA_CRON',
+        ]);
+
+        // 7. Vencimiento estricto en solicitudes: Intentar solicitar permiso administrativo para un año concluido falla
+        $resVencido = $this->withHeaders($this->headers())->postJson('/api/permisos', [
+            'insamu_user_id' => 'DOC_ACTIVO_2',
+            'tipo_permiso' => 'Permiso Administrativo',
+            'fecha_inicio' => '2025-11-10',
+            'fecha_fin' => '2025-11-10',
+            'dias_solicitados' => 1.0,
+            'insamu_visador_id' => 'VIS_01',
+        ]);
+
+        $resVencido->assertStatus(422)
+            ->assertJsonPath('errors.fecha_inicio.0', 'El saldo de días administrativos del año 2025 caducó el 31 de diciembre de dicho año. Los días no utilizados no se traspasan ni pueden ser solicitados.');
+    }
+
+    /**
+     * Cálculo Simple de Fechas: Se descarta la integración de calendarios de feriados nacionales.
+     * La API confía plenamente en la cantidad enviada por el frontend (dias_solicitados)
+     * y los descuenta linealmente del saldo del funcionario.
+     */
+    public function test_calculo_simple_de_fechas_descuento_lineal(): void
+    {
+        PermisoSaldo::create([
+            'insamu_user_id' => 'USR_CALC_FECHAS',
+            'anio' => 2026,
+            'tipo_permiso' => PermisoSaldo::TIPO_ADMINISTRATIVO,
+            'dias_totales' => 6.0,
+            'dias_usados' => 0.0,
+        ]);
+
+        // Solicita 3 días en un rango que abarca fin de semana; la API no altera los días solicitados
+        $payload = [
+            'insamu_user_id' => 'USR_CALC_FECHAS',
+            'tipo_permiso' => 'Permiso Administrativo',
+            'fecha_inicio' => '2026-05-15',
+            'fecha_fin' => '2026-05-18',
+            'dias_solicitados' => 3.0,
+            'insamu_visador_id' => 'VIS_01',
+        ];
+
+        $response = $this->withHeaders($this->headers())->postJson('/api/permisos', $payload);
+
+        $response->assertStatus(201)
+            ->assertJsonPath('status', 'success')
+            ->assertJsonPath('data.dias_solicitados', 3);
+
+        $saldo = PermisoSaldo::where('insamu_user_id', 'USR_CALC_FECHAS')->where('anio', 2026)->first();
+        $this->assertEquals(3.0, $saldo->dias_usados);
+        $this->assertEquals(3.0, $saldo->dias_disponibles);
+    }
+
+    /**
+     * Validación Condicional de Adjuntos:
+     * El campo 'archivo' es required si tipo_permiso es:
+     * fallecimiento_familiar, nacimiento_hijo o capacitacion_autogestionada.
+     * Para otros tipos (como administrativo o feriado legal) es nullable.
+     */
+    public function test_validacion_condicional_de_adjuntos_obligatorios(): void
+    {
+        // 1. Fallecimiento familiar sin archivo -> 422 con error en 'archivo'
+        $resFallecimiento = $this->withHeaders($this->headers())->postJson('/api/permisos', [
+            'insamu_user_id' => 'USR_ADJUNTO_TEST',
+            'tipo_permiso' => 'fallecimiento_familiar',
+            'fecha_inicio' => '2026-06-10',
+            'fecha_fin' => '2026-06-12',
+            'dias_solicitados' => 3.0,
+            'insamu_visador_id' => 'VIS_01',
+        ]);
+        $resFallecimiento->assertStatus(422)
+            ->assertJsonPath('errors.archivo.0', 'El archivo adjunto es obligatorio para solicitudes de tipo fallecimiento familiar, nacimiento de hijo o capacitación autogestionada.');
+
+        // 2. Nacimiento de hijo sin archivo -> 422
+        $resNacimiento = $this->withHeaders($this->headers())->postJson('/api/permisos', [
+            'insamu_user_id' => 'USR_ADJUNTO_TEST',
+            'tipo_permiso' => 'nacimiento_hijo',
+            'fecha_inicio' => '2026-06-10',
+            'fecha_fin' => '2026-06-15',
+            'dias_solicitados' => 5.0,
+            'insamu_visador_id' => 'VIS_01',
+        ]);
+        $resNacimiento->assertStatus(422)
+            ->assertJsonPath('errors.archivo.0', 'El archivo adjunto es obligatorio para solicitudes de tipo fallecimiento familiar, nacimiento de hijo o capacitación autogestionada.');
+
+        // 3. Capacitación autogestionada sin archivo -> 422
+        $resCapacitacion = $this->withHeaders($this->headers())->postJson('/api/permisos', [
+            'insamu_user_id' => 'USR_ADJUNTO_TEST',
+            'tipo_permiso' => 'capacitacion_autogestionada',
+            'fecha_inicio' => '2026-07-01',
+            'fecha_fin' => '2026-07-02',
+            'dias_solicitados' => 2.0,
+            'insamu_visador_id' => 'VIS_01',
+        ]);
+        $resCapacitacion->assertStatus(422)
+            ->assertJsonPath('errors.archivo.0', 'El archivo adjunto es obligatorio para solicitudes de tipo fallecimiento familiar, nacimiento de hijo o capacitación autogestionada.');
+
+        // 4. Permiso Administrativo sin archivo -> Pasa validación sin error (nullable)
+        PermisoSaldo::create([
+            'insamu_user_id' => 'USR_ADJUNTO_TEST',
+            'anio' => 2026,
+            'tipo_permiso' => PermisoSaldo::TIPO_ADMINISTRATIVO,
+            'dias_totales' => 6.0,
+            'dias_usados' => 0.0,
+        ]);
+
+        $resAdmin = $this->withHeaders($this->headers())->postJson('/api/permisos', [
+            'insamu_user_id' => 'USR_ADJUNTO_TEST',
+            'tipo_permiso' => 'Permiso Administrativo',
+            'fecha_inicio' => '2026-08-01',
+            'fecha_fin' => '2026-08-01',
+            'dias_solicitados' => 1.0,
+            'insamu_visador_id' => 'VIS_01',
+        ]);
+        $resAdmin->assertStatus(201);
+    }
+
+    /**
+     * Endpoint de Archivos (Storage):
+     * Recepción, renombrado seguro (UUID) para evitar path traversal, almacenamiento y descarga.
+     */
+    public function test_almacenamiento_seguro_y_endpoint_archivos_adjuntos(): void
+    {
+        $disco = config('filesystems.default', 'local');
+        Storage::fake($disco);
+
+        // 1. Crear permiso obligatorio con archivo adjunto (fallecimiento_familiar con certificado de defunción)
+        $archivoCertificado = UploadedFile::fake()->create('certificado_defuncion_peligroso_../evil.pdf', 150, 'application/pdf');
+
+        $response = $this->withHeaders($this->headers())->post('/api/permisos', [
+            'insamu_user_id' => 'USR_STORAGE_TEST',
+            'tipo_permiso' => 'fallecimiento_familiar',
+            'fecha_inicio' => '2026-09-01',
+            'fecha_fin' => '2026-09-03',
+            'dias_solicitados' => 3.0,
+            'insamu_visador_id' => 'VIS_JEFE_01',
+            'archivo' => $archivoCertificado,
+        ]);
+
+        $response->assertStatus(201)
+            ->assertJsonPath('status', 'success');
+
+        $solicitudId = $response->json('data.id');
+        $solicitud = PermisoSolicitud::findOrFail($solicitudId);
+
+        // Verificar que archivo_adjunto_url existe y NO contiene el nombre malicioso del cliente
+        $this->assertNotNull($solicitud->archivo_adjunto_url);
+        $this->assertStringNotContainsString('evil.pdf', $solicitud->archivo_adjunto_url);
+        $this->assertStringStartsWith('adjuntos_permisos/', $solicitud->archivo_adjunto_url);
+        $this->assertStringContainsString('adjunto_', $solicitud->archivo_adjunto_url);
+
+        // Verificar existencia física en el disco seguro
+        Storage::disk($disco)->assertExists($solicitud->archivo_adjunto_url);
+
+        // 2. Descargar archivo adjunto mediante endpoint GET /api/permisos/{id}/adjunto
+        $resDescarga = $this->withHeaders($this->headers())
+            ->get("/api/permisos/{$solicitud->id}/adjunto");
+
+        $resDescarga->assertStatus(200);
+        $this->assertStringContainsString('pdf', $resDescarga->headers->get('content-type'));
+
+        // 3. Subir / actualizar archivo adjunto mediante endpoint dedicado POST /api/permisos/{id}/adjunto
+        $nuevoArchivo = UploadedFile::fake()->image('constancia_adicional.png');
+        $resSubida = $this->withHeaders($this->headers())
+            ->post("/api/permisos/{$solicitud->id}/adjunto", [
+                'archivo' => $nuevoArchivo,
+            ]);
+
+        $resSubida->assertStatus(200)
+            ->assertJsonPath('status', 'success');
+
+        $solicitud->refresh();
+        $this->assertStringEndsWith('.png', $solicitud->archivo_adjunto_url);
+        Storage::disk($disco)->assertExists($solicitud->archivo_adjunto_url);
+
+        // 4. Intentar descargar adjunto de una solicitud que no tiene archivo
+        $solicitudSinAdjunto = PermisoSolicitud::create([
+            'insamu_user_id' => 'USR_SIN_ADJUNTO',
+            'tipo_permiso' => 'Permiso Administrativo',
+            'fecha_inicio' => '2026-10-01',
+            'fecha_fin' => '2026-10-01',
+            'dias_solicitados' => 1.0,
+            'estado' => PermisoSolicitud::ESTADO_PENDIENTE_VISATURA,
+        ]);
+
+        $res404 = $this->withHeaders($this->headers())
+            ->getJson("/api/permisos/{$solicitudSinAdjunto->id}/adjunto");
+        $res404->assertStatus(404)
+            ->assertJsonPath('message', 'La solicitud no cuenta con un archivo adjunto.');
     }
 }

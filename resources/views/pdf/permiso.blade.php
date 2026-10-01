@@ -202,8 +202,8 @@
         <tr>
             <th>Tipo de Permiso</th>
             <td>{{ $solicitud->tipo_permiso }}</td>
-            <th>Días Solicitados</th>
-            <td><strong>{{ $solicitud->dias_solicitados }} día(s)</strong></td>
+            <th>{{ $solicitud->tipo_saldo === 'compensacion_tiempo' ? 'Horas Solicitadas' : 'Días Solicitados' }}</th>
+            <td><strong>{{ $solicitud->cantidad_solicitada }} {{ $solicitud->unidad_medida }}</strong></td>
         </tr>
         <tr>
             <th>Fecha Inicio</th>

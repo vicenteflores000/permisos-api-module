@@ -28,7 +28,7 @@ class VerifyApiSecretKey
             ?? $request->header('X-API-KEY')
             ?? $request->bearerToken();
 
-        if (!$providedKey || !hash_equals((string) $configuredKey, (string) $providedKey)) {
+        if (! $providedKey || ! hash_equals((string) $configuredKey, (string) $providedKey)) {
             return response()->json([
                 'error' => 'No autorizado. Clave simétrica API_SECRET_KEY inválida o ausente.',
             ], Response::HTTP_UNAUTHORIZED);

@@ -9,8 +9,12 @@ use App\Services\PermisoService;
 use Exception;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Http\Response;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
+use Symfony\Component\HttpFoundation\Response;
 
 class PermisoController extends Controller
 {
@@ -61,6 +65,9 @@ class PermisoController extends Controller
      */
     public function store(Request $request): JsonResponse
     {
+        // Cálculo Simple de Fechas: Se descarta la integración de calendarios de feriados nacionales.
+        // La API confía plenamente en la cantidad enviada por el frontend (dias_solicitados u horas_solicitadas)
+        // y los descuenta linealmente del saldo del funcionario.
         $validados = $request->validate([
             'insamu_user_id' => 'required|string|max:64',
             'nombre_solicitante' => 'nullable|string|max:255',
@@ -70,14 +77,48 @@ class PermisoController extends Controller
             'tipo_permiso' => 'required|string|max:100',
             'fecha_inicio' => 'required|date',
             'fecha_fin' => 'required|date|after_or_equal:fecha_inicio',
-            'dias_solicitados' => 'required|numeric|min:0.5',
+            'dias_solicitados' => 'nullable|numeric|min:0',
+            'horas_solicitadas' => 'nullable|numeric|min:0.5',
             'insamu_visador_id' => 'required|string|max:64',
             'nombre_visador' => 'nullable|string|max:255',
             'rut_visador' => 'nullable|string|max:20',
             'cargo_visador' => 'nullable|string|max:255',
             'rol_firma' => 'nullable|string|max:64',
             'motivo' => 'nullable|string|max:1000',
+            'archivo' => [
+                Rule::requiredIf(function () use ($request) {
+                    $slug = Str::slug($request->input('tipo_permiso', ''), '_');
+
+                    return in_array($slug, [
+                        'fallecimiento_familiar',
+                        'nacimiento_hijo',
+                        'capacitacion_autogestionada',
+                    ], true) || str_contains($slug, 'fallecimiento')
+                      || str_contains($slug, 'nacimiento')
+                      || str_contains($slug, 'capacitacion');
+                }),
+                'nullable',
+                'file',
+                'mimes:pdf,jpg,jpeg,png,doc,docx',
+                'max:10240',
+            ],
+            'archivo_adjunto_url' => 'nullable|string|max:500',
+        ], [
+            'archivo.required' => 'El archivo adjunto es obligatorio para solicitudes de tipo fallecimiento familiar, nacimiento de hijo o capacitación autogestionada.',
+            'archivo.mimes' => 'El archivo adjunto debe ser de formato PDF, JPG, PNG, DOC o DOCX.',
+            'archivo.max' => 'El archivo adjunto no puede exceder los 10MB.',
         ]);
+
+        if (empty($validados['dias_solicitados']) && empty($validados['horas_solicitadas'])) {
+            throw ValidationException::withMessages([
+                'dias_solicitados' => ['Debe indicar dias_solicitados o horas_solicitadas mayor a 0.'],
+            ]);
+        }
+
+        // Si se envió un archivo adjunto, se almacena de forma segura con UUID
+        if ($request->hasFile('archivo')) {
+            $validados['archivo_adjunto_url'] = $this->almacenarArchivoAdjunto($request->file('archivo'));
+        }
 
         try {
             $solicitud = $this->permisoService->crearSolicitud($validados);
@@ -88,10 +129,16 @@ class PermisoController extends Controller
                 'data' => $solicitud,
             ], 201);
         } catch (ValidationException $e) {
+            $errores = $e->errors();
+            $mensaje = isset($errores['saldo'])
+                ? $errores['saldo'][0]
+                : (isset($errores['archivo']) ? $errores['archivo'][0] : ($e->validator?->errors()->first() ?: 'Error de validación de saldo o datos.'));
+
             return response()->json([
                 'status' => 'error',
-                'message' => 'Error de validación de saldo o datos.',
-                'errors' => $e->errors(),
+                'error_code' => isset($errores['saldo']) ? 'SALDO_NO_CONFIGURADO' : 'VALIDATION_ERROR',
+                'message' => $mensaje,
+                'errors' => $errores,
             ], 422);
         } catch (Exception $e) {
             return response()->json([
@@ -108,7 +155,7 @@ class PermisoController extends Controller
     {
         $solicitud = PermisoSolicitud::with(['firmas'])->find($id);
 
-        if (!$solicitud) {
+        if (! $solicitud) {
             return response()->json([
                 'status' => 'error',
                 'message' => "Solicitud #{$id} no encontrada.",
@@ -129,7 +176,7 @@ class PermisoController extends Controller
     {
         $solicitud = PermisoSolicitud::with(['firmas'])->find($id);
 
-        if (!$solicitud) {
+        if (! $solicitud) {
             return response()->json([
                 'status' => 'error',
                 'message' => "Solicitud #{$id} no encontrada.",
@@ -167,17 +214,17 @@ class PermisoController extends Controller
     {
         $solicitud = PermisoSolicitud::find($id);
 
-        if (!$solicitud) {
+        if (! $solicitud) {
             return response()->json([
                 'status' => 'error',
                 'message' => "Solicitud #{$id} no encontrada.",
             ], 404);
         }
 
-        if (!$solicitud->esPendiente()) {
+        if (! $solicitud->esPendiente()) {
             return response()->json([
                 'status' => 'error',
-                'message' => "Solo se pueden editar solicitudes en estado pendiente de visación.",
+                'message' => 'Solo se pueden editar solicitudes en estado pendiente de visación.',
             ], 422);
         }
 
@@ -205,7 +252,7 @@ class PermisoController extends Controller
     {
         $solicitud = PermisoSolicitud::find($id);
 
-        if (!$solicitud) {
+        if (! $solicitud) {
             return response()->json([
                 'status' => 'error',
                 'message' => "Solicitud #{$id} no encontrada.",
@@ -241,7 +288,7 @@ class PermisoController extends Controller
     {
         $solicitud = PermisoSolicitud::with(['firmas'])->find($id);
 
-        if (!$solicitud) {
+        if (! $solicitud) {
             return response()->json([
                 'status' => 'error',
                 'message' => "Solicitud #{$id} no encontrada.",
@@ -249,7 +296,7 @@ class PermisoController extends Controller
         }
 
         // Regla: Bloquea la descarga del PDF si está en pendiente_anulacion
-        if (!$solicitud->permiteDescargaPdf()) {
+        if (! $solicitud->permiteDescargaPdf()) {
             return response()->json([
                 'status' => 'error',
                 'error' => 'Descarga de PDF bloqueada: la solicitud se encuentra en estado pendiente_anulacion.',
@@ -270,5 +317,114 @@ class PermisoController extends Controller
         $nombreArchivo = sprintf('permiso_insamu_%06d.pdf', $solicitud->id);
 
         return $pdf->stream($nombreArchivo);
+    }
+
+    /**
+     * Subir o actualizar el archivo adjunto para una solicitud existente.
+     */
+    public function subirAdjunto(Request $request, int $id): JsonResponse
+    {
+        $solicitud = PermisoSolicitud::find($id);
+
+        if (! $solicitud) {
+            return response()->json([
+                'status' => 'error',
+                'message' => "Solicitud #{$id} no encontrada.",
+            ], 404);
+        }
+
+        $request->validate([
+            'archivo' => 'required|file|mimes:pdf,jpg,jpeg,png,doc,docx|max:10240',
+        ], [
+            'archivo.required' => 'Debe adjuntar un archivo válido.',
+            'archivo.mimes' => 'El archivo adjunto debe ser de formato PDF, JPG, PNG, DOC o DOCX.',
+            'archivo.max' => 'El archivo adjunto no puede exceder los 10MB.',
+        ]);
+
+        $archivo = $request->file('archivo');
+        $rutaAlmacenada = $this->almacenarArchivoAdjunto($archivo);
+
+        $solicitud->archivo_adjunto_url = $rutaAlmacenada;
+        $solicitud->save();
+
+        LogSistema::registrar(
+            'SUBIDA_ARCHIVO_ADJUNTO',
+            $request->input('insamu_user_id', $solicitud->insamu_user_id),
+            'permisos_solicitudes',
+            $solicitud->id,
+            [
+                'archivo_url' => $rutaAlmacenada,
+                'nombre_original' => $archivo->getClientOriginalName(),
+                'tamano_bytes' => $archivo->getSize(),
+            ]
+        );
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Archivo adjunto subido y almacenado correctamente.',
+            'data' => [
+                'solicitud_id' => $solicitud->id,
+                'archivo_adjunto_url' => $rutaAlmacenada,
+                'url_descarga' => url("/api/permisos/{$solicitud->id}/adjunto"),
+            ],
+        ]);
+    }
+
+    /**
+     * Descargar o visualizar el archivo adjunto de una solicitud.
+     */
+    public function descargarAdjunto(Request $request, int $id): Response
+    {
+        $solicitud = PermisoSolicitud::find($id);
+
+        if (! $solicitud) {
+            return response()->json([
+                'status' => 'error',
+                'message' => "Solicitud #{$id} no encontrada.",
+            ], 404);
+        }
+
+        if (empty($solicitud->archivo_adjunto_url)) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'La solicitud no cuenta con un archivo adjunto.',
+            ], 404);
+        }
+
+        $disco = config('filesystems.default', 'local');
+
+        if (! Storage::disk($disco)->exists($solicitud->archivo_adjunto_url)) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'El archivo adjunto no fue encontrado en el almacenamiento.',
+            ], 404);
+        }
+
+        LogSistema::registrar(
+            'DESCARGA_ARCHIVO_ADJUNTO',
+            $request->input('insamu_user_id', $solicitud->insamu_user_id),
+            'permisos_solicitudes',
+            $solicitud->id,
+            ['archivo' => $solicitud->archivo_adjunto_url]
+        );
+
+        if ($request->boolean('download')) {
+            return Storage::disk($disco)->download($solicitud->archivo_adjunto_url);
+        }
+
+        return Storage::disk($disco)->response($solicitud->archivo_adjunto_url);
+    }
+
+    /**
+     * Almacena de manera segura un archivo adjunto renombrándolo con UUID para evitar colisiones y riesgos de seguridad.
+     */
+    protected function almacenarArchivoAdjunto(UploadedFile $archivo): string
+    {
+        $extension = strtolower($archivo->getClientOriginalExtension() ?: $archivo->guessExtension() ?: 'bin');
+        $nombreSeguro = 'adjunto_'.Str::uuid()->toString().'.'.$extension;
+        $directorio = 'adjuntos_permisos/'.date('Y/m');
+        $disco = config('filesystems.default', 'local');
+
+        return $archivo->storeAs($directorio, $nombreSeguro, $disco);
     }
 }

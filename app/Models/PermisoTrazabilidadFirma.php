@@ -42,7 +42,7 @@ class PermisoTrazabilidadFirma extends Model
      */
     public static function generarToken(): string
     {
-        return hash('sha256', Str::random(40) . microtime(true));
+        return hash('sha256', Str::random(40).microtime(true));
     }
 
     /**
@@ -62,13 +62,13 @@ class PermisoTrazabilidadFirma extends Model
         $this->estado_firma = 'aprobado';
         $this->fecha_accion = now();
 
-        if (!empty($datosVisador['nombre'])) {
+        if (! empty($datosVisador['nombre'])) {
             $this->nombre_visador = $datosVisador['nombre'];
         }
-        if (!empty($datosVisador['rut'])) {
+        if (! empty($datosVisador['rut'])) {
             $this->rut_visador = $datosVisador['rut'];
         }
-        if (!empty($datosVisador['cargo'])) {
+        if (! empty($datosVisador['cargo'])) {
             $this->cargo_visador = $datosVisador['cargo'];
         }
 
@@ -84,13 +84,13 @@ class PermisoTrazabilidadFirma extends Model
         $this->motivo_rechazo = $motivo;
         $this->fecha_accion = now();
 
-        if (!empty($datosVisador['nombre'])) {
+        if (! empty($datosVisador['nombre'])) {
             $this->nombre_visador = $datosVisador['nombre'];
         }
-        if (!empty($datosVisador['rut'])) {
+        if (! empty($datosVisador['rut'])) {
             $this->rut_visador = $datosVisador['rut'];
         }
-        if (!empty($datosVisador['cargo'])) {
+        if (! empty($datosVisador['cargo'])) {
             $this->cargo_visador = $datosVisador['cargo'];
         }
 

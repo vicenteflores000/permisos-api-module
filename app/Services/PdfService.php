@@ -4,7 +4,6 @@ namespace App\Services;
 
 use App\Models\PermisoSolicitud;
 use Barryvdh\DomPDF\Facade\Pdf;
-use Illuminate\Http\Response;
 
 class PdfService
 {

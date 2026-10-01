@@ -4,8 +4,8 @@ use App\Http\Controllers\FirmaController;
 use App\Http\Controllers\LogController;
 use App\Http\Controllers\PermisoController;
 use App\Http\Controllers\RrhhController;
+use App\Http\Controllers\RrhhSaldoController;
 use App\Http\Controllers\SaldoController;
-use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -46,6 +46,10 @@ Route::middleware(['insamu.auth'])->group(function () {
 
         // Generación y descarga de PDF inalterable
         Route::get('/{id}/pdf', [PermisoController::class, 'descargarPdf']);
+
+        // Gestión de Archivos Adjuntos (Storage)
+        Route::post('/{id}/adjunto', [PermisoController::class, 'subirAdjunto']);
+        Route::get('/{id}/adjunto', [PermisoController::class, 'descargarAdjunto']);
     });
 
     // Firma Electrónica Simple (FES)
@@ -54,17 +58,26 @@ Route::middleware(['insamu.auth'])->group(function () {
         Route::get('/verificar-token/{token}', [FirmaController::class, 'verificarToken']);
     });
 
-    // Recursos Humanos (RRHH)
+    // Recursos Humanos (RRHH) - Permisos
     Route::prefix('rrhh/permisos')->group(function () {
         Route::post('/{id}/aprobar-anulacion', [RrhhController::class, 'aprobarAnulacion']);
         Route::post('/{id}/rechazar-anulacion', [RrhhController::class, 'rechazarAnulacion']);
         Route::post('/{id}/decretar', [RrhhController::class, 'decretar']);
     });
 
-    // Saldos de Permisos
+    // Recursos Humanos (RRHH) - Gestor de Saldos
+    Route::prefix('rrhh/saldos')->group(function () {
+        Route::post('/inicializar', [RrhhSaldoController::class, 'inicializarIndividual']);
+        Route::post('/carga-masiva', [RrhhSaldoController::class, 'cargaMasiva']);
+        Route::post('/inyectar-compensacion', [RrhhSaldoController::class, 'inyectarCompensacion']);
+    });
+
+    // Saldos de Permisos y Verificación
     Route::prefix('saldos')->group(function () {
         Route::get('/{userId}', [SaldoController::class, 'show']);
+        Route::get('/{userId}/verificar', [RrhhSaldoController::class, 'verificarSaldo']);
         Route::post('/', [SaldoController::class, 'upsert']);
+        Route::post('/acumular-compensacion', [SaldoController::class, 'acumularCompensacion']);
     });
 
     // Logs de Auditoría

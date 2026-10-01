@@ -8,7 +8,6 @@ use App\Models\PermisoSolicitud;
 use App\Models\PermisoTrazabilidadFirma;
 use Carbon\Carbon;
 use Exception;
-use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -20,25 +19,78 @@ class PermisoService
     public function crearSolicitud(array $datos): PermisoSolicitud
     {
         $fechaInicio = Carbon::parse($datos['fecha_inicio']);
+        $fechaFin = Carbon::parse($datos['fecha_fin']);
         $anio = $fechaInicio->year;
-        $diasSolicitados = (float) $datos['dias_solicitados'];
+        $tipoSaldo = PermisoSaldo::normalizarTipoPermiso($datos['tipo_permiso'] ?? 'administrativo');
 
-        return DB::transaction(function () use ($datos, $anio, $diasSolicitados) {
-            // 1. Obtener o crear el saldo para el usuario e imputación del año
-            $saldo = PermisoSaldo::obtenerOCrear($datos['insamu_user_id'], $anio);
-
-            if (!$saldo->tieneSaldoSuficiente($diasSolicitados)) {
+        // Vencimiento estricto: Los días administrativos caducan el 31 de diciembre.
+        // Los días no utilizados no se traspasan ni pueden ser solicitados para años ya concluidos.
+        if ($tipoSaldo === PermisoSaldo::TIPO_ADMINISTRATIVO) {
+            if ($anio < now()->year) {
                 throw ValidationException::withMessages([
-                    'dias_solicitados' => [
-                        "Saldo insuficiente para el año {$anio}. Días disponibles: {$saldo->dias_disponibles}, solicitados: {$diasSolicitados}."
+                    'fecha_inicio' => [
+                        "El saldo de días administrativos del año {$anio} caducó el 31 de diciembre de dicho año. Los días no utilizados no se traspasan ni pueden ser solicitados.",
                     ],
                 ]);
             }
 
-            // 2. Descontar saldo preventivamente
-            $saldo->descontarDias($diasSolicitados);
+            if ($fechaFin->year !== $anio) {
+                throw ValidationException::withMessages([
+                    'fecha_fin' => [
+                        'Los permisos administrativos no pueden extenderse entre distintos años calendario debido al vencimiento estricto al 31 de diciembre.',
+                    ],
+                ]);
+            }
+        }
 
-            // 3. Crear registro de solicitud
+        $diasSolicitados = (float) ($datos['dias_solicitados'] ?? 0.0);
+        $horasSolicitadas = isset($datos['horas_solicitadas']) ? (float) $datos['horas_solicitadas'] : null;
+
+        // Si es compensación de tiempo y no se envió horas_solicitadas pero sí dias_solicitados, se interpreta como horas
+        if ($tipoSaldo === PermisoSaldo::TIPO_COMPENSACION_TIEMPO && $horasSolicitadas === null) {
+            $horasSolicitadas = $diasSolicitados;
+        }
+
+        $cantidadADescontar = ($tipoSaldo === PermisoSaldo::TIPO_COMPENSACION_TIEMPO)
+            ? ($horasSolicitadas ?? 0.0)
+            : $diasSolicitados;
+
+        $unidad = ($tipoSaldo === PermisoSaldo::TIPO_COMPENSACION_TIEMPO) ? 'horas' : 'días';
+
+        return DB::transaction(function () use ($datos, $anio, $tipoSaldo, $diasSolicitados, $horasSolicitadas, $cantidadADescontar, $unidad) {
+            // 1. Validar estrictamente existencia de saldo y cupo disponible si el permiso requiere saldo
+            if ($tipoSaldo !== null) {
+                $saldo = PermisoSaldo::where('insamu_user_id', $datos['insamu_user_id'])
+                    ->where('anio', $anio)
+                    ->where('tipo_permiso', $tipoSaldo)
+                    ->first();
+
+                // Automatización 1 de enero: Días administrativos siempre disponibles con 6 días por defecto
+                if (! $saldo && $tipoSaldo === PermisoSaldo::TIPO_ADMINISTRATIVO) {
+                    $saldo = PermisoSaldo::obtenerOCrear($datos['insamu_user_id'], $anio, PermisoSaldo::TIPO_ADMINISTRATIVO, 6.0);
+                }
+
+                if (! $saldo) {
+                    throw ValidationException::withMessages([
+                        'saldo' => [
+                            'Saldo anual no configurado. Por favor, regularice su situación con Recursos Humanos antes de solicitar este permiso.',
+                        ],
+                    ]);
+                }
+
+                if (! $saldo->tieneSaldoSuficiente($cantidadADescontar)) {
+                    $campoError = ($tipoSaldo === PermisoSaldo::TIPO_COMPENSACION_TIEMPO) ? 'horas_solicitadas' : 'dias_solicitados';
+                    throw ValidationException::withMessages([
+                        $campoError => [
+                            "Saldo insuficiente de {$saldo->tipo_permiso} para el año {$anio}. {$unidad} disponibles: {$saldo->cantidad_disponible}, solicitadas: {$cantidadADescontar}.",
+                        ],
+                    ]);
+                }
+
+                $saldo->descontarCantidad($cantidadADescontar);
+            }
+
+            // 2. Crear registro de solicitud
             $solicitud = PermisoSolicitud::create([
                 'insamu_user_id' => $datos['insamu_user_id'],
                 'nombre_solicitante' => $datos['nombre_solicitante'] ?? null,
@@ -49,8 +101,10 @@ class PermisoService
                 'fecha_inicio' => $datos['fecha_inicio'],
                 'fecha_fin' => $datos['fecha_fin'],
                 'dias_solicitados' => $diasSolicitados,
+                'horas_solicitadas' => $horasSolicitadas,
                 'estado' => PermisoSolicitud::ESTADO_PENDIENTE_VISATURA,
                 'motivo' => $datos['motivo'] ?? null,
+                'archivo_adjunto_url' => $datos['archivo_adjunto_url'] ?? null,
             ]);
 
             // 4. Crear firma inicial para Jefatura
@@ -78,6 +132,8 @@ class PermisoService
                     'fecha_fin' => $solicitud->fecha_fin,
                     'visador_inicial_id' => $firma->insamu_visador_id,
                     'token_correo' => $firma->token_correo,
+                    'tiene_adjunto' => ! empty($solicitud->archivo_adjunto_url),
+                    'archivo_adjunto_url' => $solicitud->archivo_adjunto_url,
                 ]
             );
 
@@ -94,20 +150,20 @@ class PermisoService
             // Buscar la trazabilidad pendiente por token_correo O por (permiso_id + insamu_visador_id)
             $query = PermisoTrazabilidadFirma::query()->where('estado_firma', 'pendiente');
 
-            if (!empty($datos['token_correo'])) {
+            if (! empty($datos['token_correo'])) {
                 $query->where('token_correo', $datos['token_correo']);
-            } elseif (!empty($datos['permiso_id']) && !empty($datos['insamu_visador_id'])) {
+            } elseif (! empty($datos['permiso_id']) && ! empty($datos['insamu_visador_id'])) {
                 $query->where('permiso_id', $datos['permiso_id'])
-                      ->where('insamu_visador_id', $datos['insamu_visador_id']);
+                    ->where('insamu_visador_id', $datos['insamu_visador_id']);
             } else {
-                throw new Exception("Debe proveer token_correo o (permiso_id y insamu_visador_id).");
+                throw new Exception('Debe proveer token_correo o (permiso_id y insamu_visador_id).');
             }
 
             /** @var PermisoTrazabilidadFirma|null $firma */
             $firma = $query->first();
 
-            if (!$firma) {
-                throw new Exception("No se encontró una firma pendiente válida o el enlace ha caducado/sido revocado.");
+            if (! $firma) {
+                throw new Exception('No se encontró una firma pendiente válida o el enlace ha caducado/sido revocado.');
             }
 
             $solicitud = $firma->solicitud;
@@ -152,7 +208,7 @@ class PermisoService
                     $solicitud->save();
                 } elseif ($solicitud->estado === PermisoSolicitud::ESTADO_EN_RRHH) {
                     $solicitud->estado = PermisoSolicitud::ESTADO_DECRETADO;
-                    if (!empty($datos['decreto_numero'])) {
+                    if (! empty($datos['decreto_numero'])) {
                         $solicitud->decreto_numero = $datos['decreto_numero'];
                         $solicitud->fecha_decreto = now();
                     }
@@ -177,11 +233,15 @@ class PermisoService
                 $solicitud->estado = PermisoSolicitud::ESTADO_RECHAZADO;
                 $solicitud->save();
 
-                // Restituir días automáticamente al rechazarse
-                $saldo = PermisoSaldo::where('insamu_user_id', $solicitud->insamu_user_id)
-                    ->where('anio', $solicitud->anio_imputacion)
-                    ->first();
-                $saldo?->restituirDias($solicitud->dias_solicitados);
+                // Restituir saldo automáticamente al rechazarse (si el permiso descuenta saldo)
+                $tipoSaldo = $solicitud->tipo_saldo;
+                if ($tipoSaldo !== null) {
+                    $saldo = PermisoSaldo::where('insamu_user_id', $solicitud->insamu_user_id)
+                        ->where('anio', $solicitud->anio_imputacion)
+                        ->where('tipo_permiso', $tipoSaldo)
+                        ->first();
+                    $saldo?->restituirCantidad($solicitud->cantidad_solicitada);
+                }
 
                 LogSistema::registrar(
                     'FIRMA_ELECTRONICA_RECHAZADA',
@@ -191,7 +251,8 @@ class PermisoService
                     [
                         'rol_firma' => $firma->rol_firma,
                         'motivo_rechazo' => $motivo,
-                        'dias_restituidos' => $solicitud->dias_solicitados,
+                        'cantidad_restituida' => $solicitud->cantidad_solicitada,
+                        'tipo_saldo' => $tipoSaldo,
                     ]
                 );
             } else {
@@ -208,15 +269,15 @@ class PermisoService
      */
     public function subrogarVisador(PermisoSolicitud $solicitud, array $datos): array
     {
-        if (!$solicitud->esPendiente()) {
+        if (! $solicitud->esPendiente()) {
             throw new Exception("Solo se puede asignar subrogante mientras la solicitud esté en estado pendiente ('{$solicitud->estado}').");
         }
 
         return DB::transaction(function () use ($solicitud, $datos) {
             $firmaPendiente = $solicitud->firmaPendiente;
 
-            if (!$firmaPendiente) {
-                throw new Exception("No existe una firma pendiente para subrogar en esta solicitud.");
+            if (! $firmaPendiente) {
+                throw new Exception('No existe una firma pendiente para subrogar en esta solicitud.');
             }
 
             $tokenOriginal = $firmaPendiente->token_correo;
@@ -227,7 +288,7 @@ class PermisoService
             // Invalida inmediatamente el token_correo del visador original
             $firmaPendiente->token_correo = null;
             $firmaPendiente->estado_firma = 'subrogado';
-            $firmaPendiente->motivo_rechazo = 'Subrogado por: ' . ($datos['nuevo_nombre_visador'] ?? $datos['nuevo_visador_id']);
+            $firmaPendiente->motivo_rechazo = 'Subrogado por: '.($datos['nuevo_nombre_visador'] ?? $datos['nuevo_visador_id']);
             $firmaPendiente->save();
 
             // Genera nuevo registro para el subrogante con token fresco
@@ -253,7 +314,7 @@ class PermisoService
                 [
                     'visador_anterior_id' => $visadorOriginalId,
                     'nuevo_visador_subrogante_id' => $nuevaFirma->insamu_visador_id,
-                    'token_anterior_invalidado' => !empty($tokenOriginal),
+                    'token_anterior_invalidado' => ! empty($tokenOriginal),
                     'nuevo_token_generado' => $nuevoToken,
                     'rol_firma' => $rol,
                 ]
@@ -314,13 +375,16 @@ class PermisoService
             $solicitud->estado = PermisoSolicitud::ESTADO_ANULADO;
             $solicitud->save();
 
-            // Restituir el saldo al usuario
-            $saldo = PermisoSaldo::where('insamu_user_id', $solicitud->insamu_user_id)
-                ->where('anio', $solicitud->anio_imputacion)
-                ->first();
+            // Restituir el saldo al usuario (si el permiso descuenta saldo)
+            $tipoSaldo = $solicitud->tipo_saldo;
+            $saldo = null;
+            if ($tipoSaldo !== null) {
+                $saldo = PermisoSaldo::where('insamu_user_id', $solicitud->insamu_user_id)
+                    ->where('anio', $solicitud->anio_imputacion)
+                    ->where('tipo_permiso', $tipoSaldo)
+                    ->first();
 
-            if ($saldo) {
-                $saldo->restituirDias($solicitud->dias_solicitados);
+                $saldo?->restituirCantidad($solicitud->cantidad_solicitada);
             }
 
             LogSistema::registrar(
@@ -329,8 +393,9 @@ class PermisoService
                 'permisos_solicitudes',
                 $solicitud->id,
                 [
-                    'dias_restituidos' => $solicitud->dias_solicitados,
-                    'nuevo_saldo_disponible' => $saldo?->dias_disponibles,
+                    'cantidad_restituida' => $solicitud->cantidad_solicitada,
+                    'tipo_saldo' => $tipoSaldo,
+                    'nuevo_saldo_disponible' => $saldo?->cantidad_disponible,
                 ]
             );
 
