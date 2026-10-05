@@ -3,6 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <title>Permiso Administrativo #{{ $solicitud->id }} - INSAMU</title>
+    @php
+        $validationUrl = $validationUrl ?? (rtrim((string) (config('services.insamu.url') ?: env('INSAMU_URL') ?: env('INSAMU_BASE_URL') ?: 'https://salud.mdonihue.cl'), '/') . '/permisos/validar/' . $solicitud->id);
+        $qrDataUri = $qrDataUri ?? (class_exists(\App\Services\QrCodeService::class) ? \App\Services\QrCodeService::dataUri($validationUrl, 100, 'M', 2) : null);
+    @endphp
     <style>
         @page {
             margin: 25mm 20mm 25mm 20mm;
@@ -261,6 +265,34 @@
             </p>
         @endforelse
     </div>
+
+    <div class="section-title">IV. Certificación Digital y Validación de Autenticidad (Código QR)</div>
+    <table style="width: 100%; border-collapse: collapse; border: 1.5px solid #2b6cb0; background-color: #f7fafc; border-radius: 4px; margin-top: 8px; margin-bottom: 20px; page-break-inside: avoid;">
+        <tr>
+            <td style="width: 95px; text-align: center; vertical-align: middle; padding: 10px; border: none; background-color: #ffffff; border-right: 1px solid #e2e8f0;">
+                @if(!empty($qrDataUri))
+                    <img src="{{ $qrDataUri }}" width="85" height="85" alt="Código QR de Validación" style="display: block; margin: 0 auto;">
+                @endif
+            </td>
+            <td style="padding: 10px 14px; vertical-align: middle; border: none;">
+                <div style="font-size: 9.5pt; font-weight: bold; color: #2b6cb0; text-transform: uppercase; letter-spacing: 0.3px;">
+                    Cotejo Oficial de Firmas Electrónicas y Validez
+                </div>
+                <div style="font-size: 8.5pt; color: #2d3748; margin-top: 3px; line-height: 1.4;">
+                    Para comprobar la autenticidad, vigencia e inalterabilidad de este documento, escanee el código QR con cualquier smartphone o ingrese directamente a la URL de validación:
+                </div>
+                <div style="margin-top: 4px;">
+                    <a href="{{ $validationUrl }}" style="font-size: 8pt; font-weight: bold; color: #2b6cb0; text-decoration: underline; font-family: monospace;">
+                        {{ $validationUrl }}
+                    </a>
+                </div>
+                <div style="font-size: 7.5pt; color: #718096; margin-top: 4px; border-top: 1px dashed #cbd5e0; padding-top: 3px;">
+                    Código de Integridad: <span style="font-family: monospace; font-weight: bold; color: #4a5568;">{{ strtoupper(substr(hash('sha256', 'INSAMU_'.$solicitud->id.'_'.$solicitud->created_at), 0, 24)) }}</span>
+                    &bull; Certificado emitido conforme a la Ley N° 19.799 sobre Documentos Electrónicos y Firma Electrónica.
+                </div>
+            </td>
+        </tr>
+    </table>
 
     <div class="footer">
         Documento emitido y custodiado por la API de Permisos INSAMU bajo protocolo de clave simétrica y autenticación PIN FES.

@@ -382,7 +382,10 @@ class PermisoController extends Controller
             ], 403);
         }
 
-        $pdf = $this->pdfService->generarPdf($solicitud);
+        $validationUrl = request()->query('validation_url');
+        $qrDataUri = request()->query('qr_data_uri');
+
+        $pdf = $this->pdfService->generarPdf($solicitud, $validationUrl, $qrDataUri);
 
         LogSistema::registrar(
             'DESCARGA_PDF',
