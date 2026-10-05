@@ -1188,4 +1188,72 @@ class PermisosApiTest extends TestCase
         $res404->assertStatus(404)
             ->assertJsonPath('message', 'La solicitud no cuenta con un archivo adjunto.');
     }
+
+    /**
+     * Valida que una solicitud creada solo con Dirección como visador
+     * inicia en pendiente_direccion y al firmar pasa directamente a en_rrhh.
+     */
+    public function test_solicitud_solo_con_direccion_inicia_pendiente_direccion_y_pasa_directo_a_rrhh(): void
+    {
+        PermisoSaldo::create([
+            'insamu_user_id' => 'USR_DIRECTO_DIR',
+            'anio' => 2026,
+            'dias_totales' => 6.0,
+            'dias_usados' => 0.0,
+        ]);
+
+        $payload = [
+            'insamu_user_id' => 'USR_DIRECTO_DIR',
+            'nombre_solicitante' => 'Carlos Funcionario',
+            'rut_solicitante' => '11.222.333-4',
+            'cargo_solicitante' => 'TENS',
+            'unidad_solicitante' => 'CESFAM Doñihue',
+            'tipo_permiso' => 'Permiso Administrativo',
+            'fecha_inicio' => '2026-11-01',
+            'fecha_fin' => '2026-11-01',
+            'dias_solicitados' => 1.0,
+            'insamu_visador_id' => 'director@salud.cl',
+            'nombre_visador' => 'Dr. Director',
+            'rut_visador' => '7.888.999-0',
+            'cargo_visador' => 'Director/a CESFAM',
+            'rol_firma' => 'Dirección',
+            'motivo' => 'Trámite personal',
+        ];
+
+        $response = $this->withHeaders($this->headers())->postJson('/api/permisos', $payload);
+
+        $response->assertStatus(201)
+            ->assertJsonPath('status', 'success')
+            ->assertJsonPath('data.estado', 'pendiente_direccion');
+
+        $solicitudId = $response->json('data.id');
+        $solicitud = PermisoSolicitud::findOrFail($solicitudId);
+        $this->assertEquals(PermisoSolicitud::ESTADO_PENDIENTE_DIRECCION, $solicitud->estado);
+
+        // Director firma la solicitud
+        $firma = $solicitud->firmas()->where('estado_firma', 'pendiente')->first();
+        $this->assertNotNull($firma);
+        $this->assertEquals('Dirección', $firma->rol_firma);
+
+        $resFirma = $this->withHeaders($this->headers())->postJson('/api/firmas/confirmar', [
+            'permiso_id' => $solicitudId,
+            'token_correo' => $firma->token_correo,
+            'accion' => 'aprobar',
+            'nombre_firmante' => 'Dr. Director',
+            'rut_firmante' => '7.888.999-0',
+            'cargo_firmante' => 'Director CESFAM',
+            'observaciones' => 'Aprobado sin reparos',
+        ]);
+
+        $resFirma->assertStatus(200)
+            ->assertJsonPath('status', 'success')
+            ->assertJsonPath('data.nuevo_estado', 'en_rrhh');
+
+        $solicitud->refresh();
+        $this->assertEquals(PermisoSolicitud::ESTADO_EN_RRHH, $solicitud->estado);
+
+        // Verificar que no se generó una segunda firma pendiente para direccion_general
+        $firmasPendientes = $solicitud->firmas()->where('estado_firma', 'pendiente')->count();
+        $this->assertEquals(0, $firmasPendientes);
+    }
 }

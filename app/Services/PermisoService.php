@@ -90,6 +90,13 @@ class PermisoService
                 $saldo->descontarCantidad($cantidadADescontar);
             }
 
+            $esDireccionInicial = in_array(strtolower((string) ($datos['rol_firma'] ?? '')), ['dirección', 'direccion', 'direccion_cesfam', 'direccion_desam'], true)
+                || str_contains(strtolower((string) ($datos['cargo_visador'] ?? '')), 'director')
+                || str_contains(strtolower((string) ($datos['cargo_visador'] ?? '')), 'dirección');
+
+            $estadoInicial = $esDireccionInicial ? PermisoSolicitud::ESTADO_PENDIENTE_DIRECCION : PermisoSolicitud::ESTADO_PENDIENTE_VISATURA;
+            $rolFirmaInicial = $esDireccionInicial ? 'Dirección' : ($datos['rol_firma'] ?? 'Jefatura');
+
             // 2. Crear registro de solicitud
             $solicitud = PermisoSolicitud::create([
                 'insamu_user_id' => $datos['insamu_user_id'],
@@ -102,19 +109,19 @@ class PermisoService
                 'fecha_fin' => $datos['fecha_fin'],
                 'dias_solicitados' => $diasSolicitados,
                 'horas_solicitadas' => $horasSolicitadas,
-                'estado' => PermisoSolicitud::ESTADO_PENDIENTE_VISATURA,
+                'estado' => $estadoInicial,
                 'motivo' => $datos['motivo'] ?? null,
                 'archivo_adjunto_url' => $datos['archivo_adjunto_url'] ?? null,
             ]);
 
-            // 4. Crear firma inicial para Jefatura
+            // 4. Crear firma inicial
             $firma = PermisoTrazabilidadFirma::create([
                 'permiso_id' => $solicitud->id,
                 'insamu_visador_id' => $datos['insamu_visador_id'],
                 'nombre_visador' => $datos['nombre_visador'] ?? null,
                 'rut_visador' => $datos['rut_visador'] ?? null,
-                'cargo_visador' => $datos['cargo_visador'] ?? 'Jefatura Directa',
-                'rol_firma' => $datos['rol_firma'] ?? 'Jefatura',
+                'cargo_visador' => $datos['cargo_visador'] ?? ($esDireccionInicial ? 'Dirección' : 'Jefatura Directa'),
+                'rol_firma' => $rolFirmaInicial,
                 'estado_firma' => 'pendiente',
                 'es_subrogante' => false,
                 'token_correo' => PermisoTrazabilidadFirma::generarToken(),
@@ -208,7 +215,15 @@ class PermisoService
                 $firma->registrarAprobacion($datosVisador);
 
                 // Avanzar según estado actual de la solicitud
-                if ($solicitud->estado === PermisoSolicitud::ESTADO_PENDIENTE_VISATURA) {
+                $esFirmaDireccion = in_array(strtolower((string) $firma->rol_firma), ['dirección', 'direccion', 'direccion_cesfam', 'direccion_desam'], true)
+                    || in_array(strtolower((string) $firma->insamu_visador_id), ['direccion_general', 'direccion_comunal'], true)
+                    || str_contains(strtolower((string) $firma->cargo_visador), 'director')
+                    || str_contains(strtolower((string) $firma->cargo_visador), 'dirección');
+
+                if ($solicitud->estado === PermisoSolicitud::ESTADO_PENDIENTE_DIRECCION || $esFirmaDireccion) {
+                    $solicitud->estado = PermisoSolicitud::ESTADO_EN_RRHH;
+                    $solicitud->save();
+                } elseif ($solicitud->estado === PermisoSolicitud::ESTADO_PENDIENTE_VISATURA) {
                     $solicitud->estado = PermisoSolicitud::ESTADO_PENDIENTE_DIRECCION;
                     $solicitud->save();
 
@@ -224,9 +239,6 @@ class PermisoService
                         'es_subrogante' => false,
                         'token_correo' => PermisoTrazabilidadFirma::generarToken(),
                     ]);
-                } elseif ($solicitud->estado === PermisoSolicitud::ESTADO_PENDIENTE_DIRECCION) {
-                    $solicitud->estado = PermisoSolicitud::ESTADO_EN_RRHH;
-                    $solicitud->save();
                 } elseif ($solicitud->estado === PermisoSolicitud::ESTADO_EN_RRHH) {
                     $solicitud->estado = PermisoSolicitud::ESTADO_DECRETADO;
                     if (! empty($datos['decreto_numero'])) {
