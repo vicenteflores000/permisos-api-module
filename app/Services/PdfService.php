@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\PermisoSolicitud;
 use Barryvdh\DomPDF\Facade\Pdf;
+use Illuminate\Support\Facades\Log;
 
 class PdfService
 {
@@ -20,7 +21,12 @@ class PdfService
         }
 
         if (empty($qrDataUri)) {
-            $qrDataUri = QrCodeService::dataUri($validationUrl, 100, 'M', 2);
+            try {
+                $qrDataUri = QrCodeService::dataUri($validationUrl, 100, 'M', 2);
+            } catch (\Throwable $e) {
+                Log::warning('No se pudo generar QR para PDF: '.$e->getMessage());
+                $qrDataUri = null;
+            }
         }
 
         $pdf = Pdf::loadView('pdf.permiso', [

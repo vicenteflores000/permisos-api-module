@@ -362,9 +362,10 @@ class PermisoController extends Controller
      * Descarga del PDF inalterable del permiso.
      * BLOQUEADO si la solicitud está en estado 'pendiente_anulacion'.
      */
-    public function descargarPdf(int $id)
+    public function descargarPdf(int|string $id)
     {
-        $solicitud = PermisoSolicitud::with(['firmas'])->find($id);
+        $cleanId = (int) preg_replace('/[^0-9]/', '', (string) $id);
+        $solicitud = PermisoSolicitud::with(['firmas'])->find($cleanId ?: $id);
 
         if (! $solicitud) {
             return response()->json([
