@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\PermisoSolicitud;
 use App\Models\PermisoTrazabilidadFirma;
 use App\Services\PermisoService;
 use Exception;
@@ -77,6 +78,20 @@ class FirmaController extends Controller
             ->first();
 
         if (! $firma) {
+            $cleanId = (int) preg_replace('/[^0-9]/', '', $token);
+            if ($cleanId > 0) {
+                $solicitud = PermisoSolicitud::with(['firmas'])->find($cleanId);
+                if ($solicitud) {
+                    return response()->json([
+                        'status' => 'success',
+                        'valido' => true,
+                        'data' => [
+                            'solicitud' => $solicitud,
+                        ],
+                    ]);
+                }
+            }
+
             return response()->json([
                 'status' => 'error',
                 'valido' => false,
@@ -90,6 +105,13 @@ class FirmaController extends Controller
                 'valido' => false,
                 'message' => "Esta solicitud ya fue gestionada previamente (estado de firma: {$firma->estado_firma}).",
                 'estado_firma' => $firma->estado_firma,
+                'data' => [
+                    'firma_id' => $firma->id,
+                    'rol_firma' => $firma->rol_firma,
+                    'es_subrogante' => $firma->es_subrogante,
+                    'insamu_visador_id' => $firma->insamu_visador_id,
+                    'solicitud' => $firma->solicitud,
+                ],
             ], 410);
         }
 

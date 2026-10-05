@@ -16,7 +16,7 @@ class PdfService
         $solicitud->load(['firmasAprobadas']);
 
         if (empty($validationUrl)) {
-            $insamuUrl = rtrim((string) (config('services.insamu.url') ?: env('INSAMU_URL') ?: env('INSAMU_BASE_URL') ?: 'https://salud.mdonihue.cl'), '/');
+            $insamuUrl = rtrim((string) (config('services.insamu.url') ?: env('INSAMU_URL') ?: env('INSAMU_BASE_URL') ?: 'https://insamu.mdonihue.cl'), '/');
             $validationUrl = "{$insamuUrl}/permisos/validar/{$solicitud->id}";
         }
 

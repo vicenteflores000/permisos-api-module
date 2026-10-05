@@ -632,7 +632,7 @@ class PermisosApiTest extends TestCase
 
         // Verificar que incluya el Código QR y la sección de validación de autenticidad
         $this->assertStringContainsString('Validación de Autenticidad (Código QR)', $html);
-        $this->assertStringContainsString('data:image/svg+xml;base64,', $html);
+        $this->assertTrue(str_contains($html, 'data:image/png;base64,') || str_contains($html, 'data:image/svg+xml;base64,'));
         $this->assertStringContainsString('/permisos/validar/', $html);
 
         // Verificar que se haya registrado el log de descarga

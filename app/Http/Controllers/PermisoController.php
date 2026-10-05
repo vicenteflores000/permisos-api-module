@@ -182,9 +182,10 @@ class PermisoController extends Controller
     /**
      * Visualizar detalle de una solicitud de permiso y sus firmas.
      */
-    public function show(int $id): JsonResponse
+    public function show(int|string $id): JsonResponse
     {
-        $solicitud = PermisoSolicitud::with(['firmas'])->find($id);
+        $cleanId = (int) preg_replace('/[^0-9]/', '', (string) $id);
+        $solicitud = PermisoSolicitud::with(['firmas', 'firmasAprobadas'])->find($cleanId > 0 ? $cleanId : $id);
 
         if (! $solicitud) {
             return response()->json([

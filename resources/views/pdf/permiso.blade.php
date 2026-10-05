@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <title>Permiso Administrativo #{{ $solicitud->id }} - INSAMU</title>
     @php
-        $validationUrl = $validationUrl ?? (rtrim((string) (config('services.insamu.url') ?: env('INSAMU_URL') ?: env('INSAMU_BASE_URL') ?: 'https://salud.mdonihue.cl'), '/') . '/permisos/validar/' . $solicitud->id);
+        $validationUrl = $validationUrl ?? (rtrim((string) (config('services.insamu.url') ?: env('INSAMU_URL') ?: env('INSAMU_BASE_URL') ?: 'https://insamu.mdonihue.cl'), '/') . '/permisos/validar/' . $solicitud->id);
         $qrDataUri = $qrDataUri ?? (class_exists(\App\Services\QrCodeService::class) ? \App\Services\QrCodeService::dataUri($validationUrl, 100, 'M', 2) : null);
     @endphp
     <style>
