@@ -34,6 +34,8 @@ class FirmaController extends Controller
             'siguiente_nombre_visador' => 'nullable|string|max:255',
             'siguiente_rut_visador' => 'nullable|string|max:20',
             'siguiente_cargo_visador' => 'nullable|string|max:255',
+            'rol_firma' => 'nullable|string|max:64',
+            'observaciones' => 'nullable|string|max:1000',
             'decreto_numero' => 'nullable|string|max:64',
         ]);
 

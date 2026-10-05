@@ -162,7 +162,17 @@ class PermisoService
             } elseif (! empty($datos['permiso_id'])) {
                 $query->where('permiso_id', $datos['permiso_id']);
 
-                if (! empty($datos['insamu_visador_id'])) {
+                $solicitudActual = PermisoSolicitud::find($datos['permiso_id']);
+
+                if ($solicitudActual && $solicitudActual->estado === PermisoSolicitud::ESTADO_PENDIENTE_DIRECCION) {
+                    $query->where(function ($q) {
+                        $q->where('insamu_visador_id', 'direccion_general')
+                            ->orWhere('insamu_visador_id', 'direccion_comunal')
+                            ->orWhereRaw("LOWER(rol_firma) LIKE 'direcci%'")
+                            ->orWhereRaw("LOWER(cargo_visador) LIKE '%director%'")
+                            ->orWhereRaw("LOWER(cargo_visador) LIKE '%direcci%'");
+                    });
+                } elseif (! empty($datos['insamu_visador_id'])) {
                     $visId = (string) $datos['insamu_visador_id'];
                     $visIdLower = strtolower(trim($visId));
                     $cleanRut = preg_replace('/[^0-9kK]/', '', $visId);
@@ -171,8 +181,8 @@ class PermisoService
                         $q->where('insamu_visador_id', $visId)
                             ->orWhereRaw('LOWER(insamu_visador_id) = ?', [$visIdLower])
                             ->orWhere('insamu_visador_id', 'direccion_general')
-                            ->orWhere('rol_firma', 'Dirección')
-                            ->orWhere('rol_firma', 'direccion');
+                            ->orWhere('insamu_visador_id', 'direccion_comunal')
+                            ->orWhereRaw("LOWER(rol_firma) LIKE 'direcci%'");
 
                         if (! empty($cleanRut)) {
                             $q->orWhereRaw("REPLACE(REPLACE(rut_visador, '.', ''), '-', '') = ?", [$cleanRut]);
@@ -185,6 +195,13 @@ class PermisoService
 
             /** @var PermisoTrazabilidadFirma|null $firma */
             $firma = $query->first();
+
+            // Fallback: si la consulta estricta no encontró firma pero la solicitud tiene una firma pendiente
+            if (! $firma && ! empty($datos['permiso_id'])) {
+                $firma = PermisoTrazabilidadFirma::where('permiso_id', $datos['permiso_id'])
+                    ->where('estado_firma', 'pendiente')
+                    ->first();
+            }
 
             if (! $firma) {
                 throw new Exception('No se encontró una firma pendiente válida o el enlace ha caducado/sido revocado.');
@@ -215,8 +232,9 @@ class PermisoService
                 $firma->registrarAprobacion($datosVisador);
 
                 // Avanzar según estado actual de la solicitud
-                $esFirmaDireccion = in_array(strtolower((string) $firma->rol_firma), ['dirección', 'direccion', 'direccion_cesfam', 'direccion_desam'], true)
+                $esFirmaDireccion = in_array(strtolower((string) $firma->rol_firma), ['dirección', 'direccion', 'direccion_cesfam', 'direccion_desam', 'direccion_general'], true)
                     || in_array(strtolower((string) $firma->insamu_visador_id), ['direccion_general', 'direccion_comunal'], true)
+                    || in_array(strtolower((string) ($datos['rol_firma'] ?? '')), ['dirección', 'direccion', 'direccion_cesfam', 'direccion_desam'], true)
                     || str_contains(strtolower((string) $firma->cargo_visador), 'director')
                     || str_contains(strtolower((string) $firma->cargo_visador), 'dirección');
 
