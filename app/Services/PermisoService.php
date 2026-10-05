@@ -152,11 +152,28 @@ class PermisoService
 
             if (! empty($datos['token_correo'])) {
                 $query->where('token_correo', $datos['token_correo']);
-            } elseif (! empty($datos['permiso_id']) && ! empty($datos['insamu_visador_id'])) {
-                $query->where('permiso_id', $datos['permiso_id'])
-                    ->where('insamu_visador_id', $datos['insamu_visador_id']);
+            } elseif (! empty($datos['permiso_id'])) {
+                $query->where('permiso_id', $datos['permiso_id']);
+
+                if (! empty($datos['insamu_visador_id'])) {
+                    $visId = (string) $datos['insamu_visador_id'];
+                    $visIdLower = strtolower(trim($visId));
+                    $cleanRut = preg_replace('/[^0-9kK]/', '', $visId);
+
+                    $query->where(function ($q) use ($visId, $visIdLower, $cleanRut) {
+                        $q->where('insamu_visador_id', $visId)
+                            ->orWhereRaw('LOWER(insamu_visador_id) = ?', [$visIdLower])
+                            ->orWhere('insamu_visador_id', 'direccion_general')
+                            ->orWhere('rol_firma', 'Dirección')
+                            ->orWhere('rol_firma', 'direccion');
+
+                        if (! empty($cleanRut)) {
+                            $q->orWhereRaw("REPLACE(REPLACE(rut_visador, '.', ''), '-', '') = ?", [$cleanRut]);
+                        }
+                    });
+                }
             } else {
-                throw new Exception('Debe proveer token_correo o (permiso_id y insamu_visador_id).');
+                throw new Exception('Debe proveer token_correo o permiso_id.');
             }
 
             /** @var PermisoTrazabilidadFirma|null $firma */
@@ -164,6 +181,10 @@ class PermisoService
 
             if (! $firma) {
                 throw new Exception('No se encontró una firma pendiente válida o el enlace ha caducado/sido revocado.');
+            }
+
+            if ($firma->insamu_visador_id === 'direccion_general' && ! empty($datos['insamu_visador_id'])) {
+                $firma->insamu_visador_id = $datos['insamu_visador_id'];
             }
 
             $solicitud = $firma->solicitud;

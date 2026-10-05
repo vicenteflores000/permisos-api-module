@@ -448,6 +448,46 @@ class PermisosApiTest extends TestCase
     }
 
     /**
+     * Dirección firma con su propio email cuando en trazabilidad estaba como 'direccion_general'
+     * y la solicitud avanza exitosamente a 'en_rrhh'.
+     */
+    public function test_direccion_firma_con_su_email_y_pasa_a_en_rrhh(): void
+    {
+        $solicitud = PermisoSolicitud::create([
+            'insamu_user_id' => 'USR_DIR_TEST',
+            'tipo_permiso' => 'Permiso Administrativo',
+            'fecha_inicio' => '2026-10-20',
+            'fecha_fin' => '2026-10-20',
+            'dias_solicitados' => 1.0,
+            'estado' => PermisoSolicitud::ESTADO_PENDIENTE_DIRECCION,
+        ]);
+
+        PermisoTrazabilidadFirma::create([
+            'permiso_id' => $solicitud->id,
+            'insamu_visador_id' => 'direccion_general',
+            'nombre_visador' => 'Dirección General',
+            'rol_firma' => 'Dirección',
+            'estado_firma' => 'pendiente',
+        ]);
+
+        $response = $this->withHeaders($this->headers())
+            ->postJson('/api/firmas/confirmar', [
+                'permiso_id' => $solicitud->id,
+                'insamu_visador_id' => 'director@mdonihue.cl',
+                'accion' => 'aprobar',
+                'nombre_firmante' => 'Dr. Director',
+                'rut_firmante' => '12.345.678-9',
+                'cargo_firmante' => 'Director Comunal de Salud',
+            ]);
+
+        $response->assertStatus(200)
+            ->assertJsonPath('data.nuevo_estado', 'en_rrhh');
+
+        $solicitud->refresh();
+        $this->assertEquals(PermisoSolicitud::ESTADO_EN_RRHH, $solicitud->estado);
+    }
+
+    /**
      * RRHH: Aprobar anulación restituye el saldo en permisos_saldos y pasa a 'anulado'.
      */
     public function test_rrhh_aprueba_anulacion_y_restituye_saldo(): void

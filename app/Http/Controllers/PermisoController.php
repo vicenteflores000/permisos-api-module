@@ -133,6 +133,7 @@ class PermisoController extends Controller
                 'max:10240',
             ],
             'archivo_adjunto_url' => 'nullable|string|max:500',
+            'visadores' => 'nullable|array',
         ], [
             'archivo.required' => 'El archivo adjunto es obligatorio para solicitudes de tipo fallecimiento familiar, nacimiento de hijo o capacitación autogestionada.',
             'archivo.mimes' => 'El archivo adjunto debe ser de formato PDF, JPG, PNG, DOC o DOCX.',
