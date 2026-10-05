@@ -138,6 +138,7 @@ class RrhhSaldoController extends Controller
 
                     if (empty($userId)) {
                         $errores[] = "Fila #{$indice}: Falta identificador del funcionario.";
+
                         continue;
                     }
 

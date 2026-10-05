@@ -31,7 +31,34 @@ class PermisoController extends Controller
         $query = PermisoSolicitud::with(['firmas']);
 
         if ($request->filled('insamu_user_id')) {
-            $query->where('insamu_user_id', $request->query('insamu_user_id'));
+            $userId = (string) $request->query('insamu_user_id');
+            $userLower = strtolower(trim($userId));
+            $cleanRut = preg_replace('/[^0-9kK]/', '', $userId);
+
+            $query->where(function ($q) use ($userId, $userLower, $cleanRut) {
+                $q->where('insamu_user_id', $userId)
+                    ->orWhereRaw('LOWER(insamu_user_id) = ?', [$userLower])
+                    ->orWhere('rut_solicitante', $userId);
+
+                if (! empty($cleanRut)) {
+                    $q->orWhere('insamu_user_id', $cleanRut)
+                        ->orWhereRaw("REPLACE(REPLACE(rut_solicitante, '.', ''), '-', '') = ?", [$cleanRut]);
+                }
+            });
+        }
+
+        if ($request->filled('rut_solicitante')) {
+            $rut = (string) $request->query('rut_solicitante');
+            $cleanRut = preg_replace('/[^0-9kK]/', '', $rut);
+
+            $query->where(function ($q) use ($rut, $cleanRut) {
+                $q->where('rut_solicitante', $rut)
+                    ->orWhere('insamu_user_id', $rut);
+
+                if (! empty($cleanRut)) {
+                    $q->orWhereRaw("REPLACE(REPLACE(rut_solicitante, '.', ''), '-', '') = ?", [$cleanRut]);
+                }
+            });
         }
 
         if ($request->filled('estado')) {
@@ -52,6 +79,9 @@ class PermisoController extends Controller
         }
 
         $perPage = (int) $request->query('per_page', 20);
+        if ($request->boolean('all') || $perPage > 20) {
+            $perPage = min(max($perPage, 100), 500);
+        }
         $permisos = $query->orderBy('created_at', 'desc')->paginate($perPage);
 
         return response()->json([
