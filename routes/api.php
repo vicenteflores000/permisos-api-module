@@ -42,6 +42,7 @@ Route::middleware(['insamu.auth'])->group(function () {
         Route::post('/{id}/subrogar-visador', [PermisoController::class, 'subrogarVisador']);
 
         // Lógica de Anulación (Funcionario)
+        Route::post('/{id}/anular', [PermisoController::class, 'anularDirecto']);
         Route::post('/{id}/solicitar-anulacion', [PermisoController::class, 'solicitarAnulacion']);
 
         // Generación y descarga de PDF inalterable

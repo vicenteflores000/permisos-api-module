@@ -363,6 +363,65 @@ class PermisoService
     }
 
     /**
+     * Anulación directa instantánea de un permiso no decretado por el funcionario solicitante.
+     * Restituye saldo inmediatamente y pasa la solicitud a estado 'anulado'.
+     */
+    public function anularDirecto(PermisoSolicitud $solicitud, array $datos = []): PermisoSolicitud
+    {
+        if (in_array($solicitud->estado, [
+            PermisoSolicitud::ESTADO_ANULADO,
+            PermisoSolicitud::ESTADO_RECHAZADO,
+        ], true)) {
+            throw new Exception("La solicitud ya se encuentra en estado '{$solicitud->estado}'.");
+        }
+
+        if ($solicitud->estado === PermisoSolicitud::ESTADO_DECRETADO || ! empty($solicitud->decreto_numero)) {
+            throw new Exception('El documento ya se encuentra decretado. Debe solicitar autorización formal a Recursos Humanos para anularlo.');
+        }
+
+        return DB::transaction(function () use ($solicitud, $datos) {
+            $solicitud->estado_previo_anulacion = $solicitud->estado;
+            $solicitud->estado = PermisoSolicitud::ESTADO_ANULADO;
+            if (! empty($datos['motivo'])) {
+                $solicitud->motivo = $datos['motivo'];
+            }
+            $solicitud->save();
+
+            // Restituir saldo inmediatamente
+            $tipoSaldo = $solicitud->tipo_saldo;
+            $saldo = null;
+            if ($tipoSaldo !== null) {
+                $saldo = PermisoSaldo::where('insamu_user_id', $solicitud->insamu_user_id)
+                    ->where('anio', $solicitud->anio_imputacion)
+                    ->where('tipo_permiso', $tipoSaldo)
+                    ->first();
+
+                $saldo?->restituirCantidad($solicitud->cantidad_solicitada);
+            }
+
+            // Invalidar tokens pendientes de firma
+            $solicitud->firmas()->where('estado_firma', 'pendiente')->update([
+                'token_correo' => null,
+            ]);
+
+            LogSistema::registrar(
+                'ANULACION_DIRECTA',
+                $datos['insamu_user_id'] ?? $solicitud->insamu_user_id,
+                'permisos_solicitudes',
+                $solicitud->id,
+                [
+                    'motivo' => $datos['motivo'] ?? 'Anulación directa con PIN efectuada por el funcionario',
+                    'estado_anterior' => $solicitud->estado_previo_anulacion,
+                    'cantidad_restituida' => $solicitud->cantidad_solicitada,
+                    'tipo_saldo' => $tipoSaldo,
+                ]
+            );
+
+            return $solicitud->fresh(['firmas']);
+        });
+    }
+
+    /**
      * RRHH: Aprobar anulación de permiso. Restituye saldo y pasa a 'anulado'.
      */
     public function aprobarAnulacion(PermisoSolicitud $solicitud, array $datos = []): PermisoSolicitud

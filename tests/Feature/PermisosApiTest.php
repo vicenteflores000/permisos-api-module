@@ -410,6 +410,44 @@ class PermisosApiTest extends TestCase
     }
 
     /**
+     * Anulación directa instantánea: Un documento no decretado se anula de inmediato y restituye saldo.
+     */
+    public function test_anulacion_directa_instantanea_sin_decreto_restituye_saldo(): void
+    {
+        $saldo = PermisoSaldo::create([
+            'insamu_user_id' => 'USR_DIRECTO_1',
+            'anio' => 2026,
+            'dias_totales' => 6.0,
+            'dias_usados' => 1.0,
+        ]);
+
+        $solicitud = PermisoSolicitud::create([
+            'insamu_user_id' => 'USR_DIRECTO_1',
+            'tipo_permiso' => 'Permiso Administrativo',
+            'fecha_inicio' => '2026-10-15',
+            'fecha_fin' => '2026-10-15',
+            'dias_solicitados' => 1.0,
+            'estado' => PermisoSolicitud::ESTADO_PENDIENTE_DIRECCION,
+        ]);
+
+        $response = $this->withHeaders($this->headers())
+            ->postJson("/api/permisos/{$solicitud->id}/anular", [
+                'motivo' => 'Anulación inmediata por funcionario',
+            ]);
+
+        $response->assertStatus(200)
+            ->assertJsonPath('data.estado', 'anulado');
+
+        $solicitud->refresh();
+        $this->assertEquals(PermisoSolicitud::ESTADO_ANULADO, $solicitud->estado);
+
+        // El saldo debe restituirse automáticamente
+        $saldo->refresh();
+        $this->assertEquals(0.0, (float) $saldo->dias_usados);
+        $this->assertEquals(6.0, (float) $saldo->dias_disponibles);
+    }
+
+    /**
      * RRHH: Aprobar anulación restituye el saldo en permisos_saldos y pasa a 'anulado'.
      */
     public function test_rrhh_aprueba_anulacion_y_restituye_saldo(): void

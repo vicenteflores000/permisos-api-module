@@ -275,10 +275,9 @@ class PermisoController extends Controller
     }
 
     /**
-     * Solicitar anulación de la solicitud por parte del usuario.
-     * Cambia el estado a pendiente_anulacion y bloquea la descarga del PDF.
+     * Anulación directa instantánea de un permiso no decretado por el funcionario.
      */
-    public function solicitarAnulacion(Request $request, int $id): JsonResponse
+    public function anularDirecto(Request $request, int $id): JsonResponse
     {
         $solicitud = PermisoSolicitud::find($id);
 
@@ -295,6 +294,54 @@ class PermisoController extends Controller
         ]);
 
         try {
+            $solicitudActualizada = $this->permisoService->anularDirecto($solicitud, $validados);
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Permiso anulado exitosamente de forma directa e inmediata.',
+                'data' => $solicitudActualizada,
+            ]);
+        } catch (Exception $e) {
+            return response()->json([
+                'status' => 'error',
+                'message' => $e->getMessage(),
+            ], 422);
+        }
+    }
+
+    /**
+     * Solicitar anulación de la solicitud por parte del usuario.
+     * Si no está decretado, se anula de forma directa e inmediata.
+     * Si está decretado, cambia a 'pendiente_anulacion' para resolución de RRHH.
+     */
+    public function solicitarAnulacion(Request $request, int $id): JsonResponse
+    {
+        $solicitud = PermisoSolicitud::find($id);
+
+        if (! $solicitud) {
+            return response()->json([
+                'status' => 'error',
+                'message' => "Solicitud #{$id} no encontrada.",
+            ], 404);
+        }
+
+        $validados = $request->validate([
+            'insamu_user_id' => 'nullable|string|max:64',
+            'motivo' => 'nullable|string|max:1000',
+            'accion' => 'nullable|string|max:32',
+        ]);
+
+        try {
+            if (($validados['accion'] ?? '') === 'anular_directo') {
+                $solicitudActualizada = $this->permisoService->anularDirecto($solicitud, $validados);
+
+                return response()->json([
+                    'status' => 'success',
+                    'message' => 'Permiso anulado exitosamente de forma directa e inmediata.',
+                    'data' => $solicitudActualizada,
+                ]);
+            }
+
             $solicitudActualizada = $this->permisoService->solicitarAnulacion($solicitud, $validados);
 
             return response()->json([
