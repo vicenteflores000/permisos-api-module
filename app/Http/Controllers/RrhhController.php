@@ -104,6 +104,7 @@ class RrhhController extends Controller
         $validados = $request->validate([
             'decreto_numero' => 'required|string|max:64',
             'fecha_decreto' => 'nullable|date',
+            'observaciones' => 'nullable|string|max:1000',
             'insamu_user_id' => 'nullable|string|max:64',
         ]);
 

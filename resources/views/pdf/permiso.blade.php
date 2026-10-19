@@ -207,7 +207,14 @@
             <th>Tipo de Permiso</th>
             <td>{{ $solicitud->tipo_permiso }}</td>
             <th>{{ $solicitud->tipo_saldo === 'compensacion_tiempo' ? 'Horas Solicitadas' : 'Días Solicitados' }}</th>
-            <td><strong>{{ $solicitud->cantidad_solicitada }} {{ $solicitud->unidad_medida }}</strong></td>
+            <td>
+                <strong>{{ $solicitud->cantidad_solicitada }} {{ $solicitud->tipo_saldo === 'compensacion_tiempo' ? 'horas' : 'días' }}</strong>
+                @if($solicitud->tipo_saldo === 'compensacion_tiempo' && $solicitud->hora_desde && $solicitud->hora_hasta)
+                    ({{ $solicitud->hora_desde }} a {{ $solicitud->hora_hasta }})
+                @elseif($solicitud->jornada)
+                    ({{ $solicitud->jornada }})
+                @endif
+            </td>
         </tr>
         <tr>
             <th>Fecha Inicio</th>

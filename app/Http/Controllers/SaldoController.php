@@ -46,23 +46,13 @@ class SaldoController extends Controller
      */
     public function show(Request $request, string $userId): JsonResponse
     {
+        $userIdNorm = strtolower(trim($userId));
         $anio = (int) $request->query('anio', now()->year);
 
         // Asegurar que el saldo administrativo del año siempre exista automáticamente (6 días desde el 1 de enero)
-        PermisoSaldo::firstOrCreate(
-            [
-                'insamu_user_id' => $userId,
-                'anio' => $anio,
-                'tipo_permiso' => PermisoSaldo::TIPO_ADMINISTRATIVO,
-            ],
-            [
-                'unidad' => PermisoSaldo::UNIDAD_DIAS,
-                'dias_totales' => 6.0,
-                'dias_usados' => 0.0,
-            ]
-        );
+        PermisoSaldo::obtenerOCrear($userIdNorm, $anio, PermisoSaldo::TIPO_ADMINISTRATIVO, 6.0);
 
-        $query = PermisoSaldo::where('insamu_user_id', $userId);
+        $query = PermisoSaldo::query()->whereRaw('LOWER(insamu_user_id) = ?', [$userIdNorm]);
 
         if ($request->filled('anio')) {
             $query->where('anio', $anio);
@@ -80,7 +70,7 @@ class SaldoController extends Controller
         if ($saldos->isEmpty() && ($request->boolean('auto_inicializar') || app()->environment('testing'))) {
             // Inicializar automáticamente solo si se solicita o en pruebas automatizadas de la API
             $anio = (int) $request->query('anio', now()->year);
-            $saldos = PermisoSaldo::inicializarSaldosAnio($userId, $anio);
+            $saldos = PermisoSaldo::inicializarSaldosAnio($userIdNorm, $anio);
         }
 
         return response()->json([
@@ -106,14 +96,23 @@ class SaldoController extends Controller
             'cantidad_usada' => 'nullable|numeric|min:0',
         ]);
 
+        $userIdNorm = strtolower(trim((string) $validados['insamu_user_id']));
         $tipo = PermisoSaldo::normalizarTipoPermiso($request->input('tipo_permiso')) ?? PermisoSaldo::TIPO_ADMINISTRATIVO;
         $unidad = $request->input('unidad') ?? ($tipo === PermisoSaldo::TIPO_COMPENSACION_TIEMPO ? PermisoSaldo::UNIDAD_HORAS : PermisoSaldo::UNIDAD_DIAS);
         $total = (float) ($request->input('cantidad_total') ?? $request->input('dias_totales') ?? 0.0);
-        $usado = (float) ($request->input('cantidad_usada') ?? $request->input('dias_usados') ?? 0.0);
+
+        $existente = PermisoSaldo::whereRaw('LOWER(insamu_user_id) = ?', [$userIdNorm])
+            ->where('anio', $validados['anio'])
+            ->where('tipo_permiso', $tipo)
+            ->first();
+
+        $usado = ($request->has('cantidad_usada') || $request->has('dias_usados'))
+            ? (float) ($request->input('cantidad_usada') ?? $request->input('dias_usados'))
+            : ($existente ? (float) $existente->dias_usados : 0.0);
 
         $saldo = PermisoSaldo::updateOrCreate(
             [
-                'insamu_user_id' => $validados['insamu_user_id'],
+                'insamu_user_id' => $userIdNorm,
                 'anio' => $validados['anio'],
                 'tipo_permiso' => $tipo,
             ],
@@ -126,7 +125,7 @@ class SaldoController extends Controller
 
         LogSistema::registrar(
             'AJUSTE_SALDO',
-            $validados['insamu_user_id'],
+            $userIdNorm,
             'permisos_saldos',
             $saldo->id,
             [
@@ -157,8 +156,9 @@ class SaldoController extends Controller
             'motivo' => 'nullable|string|max:255',
         ]);
 
+        $userIdNorm = strtolower(trim((string) $validados['insamu_user_id']));
         $saldo = PermisoSaldo::obtenerOCrear(
-            $validados['insamu_user_id'],
+            $userIdNorm,
             (int) $validados['anio'],
             PermisoSaldo::TIPO_COMPENSACION_TIEMPO,
             0.0
@@ -207,17 +207,27 @@ class SaldoController extends Controller
         foreach ($validados['records'] as $fila) {
             $tipo = PermisoSaldo::normalizarTipoPermiso($fila['tipo_permiso'] ?? 'feriado_legal') ?? PermisoSaldo::TIPO_FERIADO_LEGAL;
             $unidad = ($tipo === PermisoSaldo::TIPO_COMPENSACION_TIEMPO) ? PermisoSaldo::UNIDAD_HORAS : PermisoSaldo::UNIDAD_DIAS;
+            $userIdNorm = strtolower(trim((string) $fila['insamu_user_id']));
+
+            $existente = PermisoSaldo::whereRaw('LOWER(insamu_user_id) = ?', [$userIdNorm])
+                ->where('anio', $anio)
+                ->where('tipo_permiso', $tipo)
+                ->first();
+
+            $diasUsados = (array_key_exists('dias_usados', $fila) && $fila['dias_usados'] !== null)
+                ? (float) $fila['dias_usados']
+                : ($existente ? (float) $existente->dias_usados : 0.0);
 
             PermisoSaldo::updateOrCreate(
                 [
-                    'insamu_user_id' => strtolower(trim((string) $fila['insamu_user_id'])),
+                    'insamu_user_id' => $userIdNorm,
                     'anio' => $anio,
                     'tipo_permiso' => $tipo,
                 ],
                 [
                     'unidad' => $unidad,
                     'dias_totales' => (float) $fila['dias_totales'],
-                    'dias_usados' => (float) ($fila['dias_usados'] ?? 0.0),
+                    'dias_usados' => $diasUsados,
                 ]
             );
 

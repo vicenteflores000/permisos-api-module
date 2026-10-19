@@ -15,6 +15,7 @@ class PermisoTrazabilidadFirma extends Model
 
     protected $fillable = [
         'permiso_id',
+        'orden',
         'insamu_visador_id',
         'nombre_visador',
         'rut_visador',
@@ -23,11 +24,13 @@ class PermisoTrazabilidadFirma extends Model
         'estado_firma',
         'es_subrogante',
         'motivo_rechazo',
+        'observaciones',
         'fecha_accion',
         'token_correo',
     ];
 
     protected $casts = [
+        'orden' => 'integer',
         'es_subrogante' => 'boolean',
         'fecha_accion' => 'datetime',
     ];
@@ -70,6 +73,12 @@ class PermisoTrazabilidadFirma extends Model
         }
         if (! empty($datosVisador['cargo'])) {
             $this->cargo_visador = $datosVisador['cargo'];
+        }
+        if (array_key_exists('es_subrogante', $datosVisador)) {
+            $this->es_subrogante = (bool) $datosVisador['es_subrogante'];
+        }
+        if (! empty($datosVisador['observaciones'])) {
+            $this->observaciones = $datosVisador['observaciones'];
         }
 
         $this->save();

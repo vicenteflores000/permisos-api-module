@@ -39,12 +39,25 @@ class PermisoSolicitud extends Model
         'fecha_fin',
         'dias_solicitados',
         'horas_solicitadas',
+        'jornada',
+        'hora_desde',
+        'hora_hasta',
+        'parentesco_fallecimiento',
         'estado',
         'motivo',
         'archivo_adjunto_url',
+        'archivo_adjunto_nombre',
+        'visadores',
         'estado_previo_anulacion',
         'decreto_numero',
         'fecha_decreto',
+        'decreto_observaciones',
+        'motivo_anulacion',
+        'anulado_por',
+        'anulado_en',
+        'solicitud_anulacion_en',
+        'anulacion_rechazada_en',
+        'anulacion_rechazo_motivo',
     ];
 
     protected $casts = [
@@ -53,6 +66,10 @@ class PermisoSolicitud extends Model
         'fecha_decreto' => 'date:Y-m-d',
         'dias_solicitados' => 'float',
         'horas_solicitadas' => 'float',
+        'visadores' => 'array',
+        'anulado_en' => 'datetime',
+        'solicitud_anulacion_en' => 'datetime',
+        'anulacion_rechazada_en' => 'datetime',
     ];
 
     protected $appends = [
@@ -75,20 +92,24 @@ class PermisoSolicitud extends Model
 
     public function firmas(): HasMany
     {
-        return $this->hasMany(PermisoTrazabilidadFirma::class, 'permiso_id');
+        return $this->hasMany(PermisoTrazabilidadFirma::class, 'permiso_id')
+            ->orderBy('orden', 'asc')
+            ->orderBy('id', 'asc');
     }
 
     public function firmaPendiente(): HasOne
     {
         return $this->hasOne(PermisoTrazabilidadFirma::class, 'permiso_id')
             ->where('estado_firma', 'pendiente')
-            ->latestOfMany();
+            ->orderBy('orden', 'asc')
+            ->orderBy('id', 'asc');
     }
 
     public function firmasAprobadas(): HasMany
     {
         return $this->hasMany(PermisoTrazabilidadFirma::class, 'permiso_id')
             ->where('estado_firma', 'aprobado')
+            ->orderBy('orden', 'asc')
             ->orderBy('fecha_accion', 'asc');
     }
 

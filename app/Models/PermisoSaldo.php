@@ -117,24 +117,32 @@ class PermisoSaldo extends Model
      */
     public static function obtenerOCrear(string $userId, int $anio, string $tipoPermiso = self::TIPO_ADMINISTRATIVO, ?float $cantidadInicial = null): self
     {
+        $userIdTrim = trim($userId);
+        $userIdNorm = strtolower($userIdTrim);
         $configSaldos = config('insamu.saldos_defecto');
         $defecto = $configSaldos[$tipoPermiso] ?? null;
 
         $unidad = $defecto['unidad'] ?? ($tipoPermiso === self::TIPO_COMPENSACION_TIEMPO ? self::UNIDAD_HORAS : self::UNIDAD_DIAS);
         $cantidad = $cantidadInicial ?? ($defecto['cantidad_defecto'] ?? ($tipoPermiso === self::TIPO_FERIADO_LEGAL ? 15.0 : ($tipoPermiso === self::TIPO_COMPENSACION_TIEMPO ? 0.0 : 6.0)));
 
-        return static::firstOrCreate(
-            [
-                'insamu_user_id' => $userId,
-                'anio' => $anio,
-                'tipo_permiso' => $tipoPermiso,
-            ],
-            [
-                'unidad' => $unidad,
-                'dias_totales' => $cantidad,
-                'dias_usados' => 0.0,
-            ]
-        );
+        $existente = static::query()
+            ->whereRaw('LOWER(insamu_user_id) = ?', [$userIdNorm])
+            ->where('anio', $anio)
+            ->where('tipo_permiso', $tipoPermiso)
+            ->first();
+
+        if ($existente) {
+            return $existente;
+        }
+
+        return static::create([
+            'insamu_user_id' => $userIdTrim,
+            'anio' => $anio,
+            'tipo_permiso' => $tipoPermiso,
+            'unidad' => $unidad,
+            'dias_totales' => $cantidad,
+            'dias_usados' => 0.0,
+        ]);
     }
 
     /**

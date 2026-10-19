@@ -1256,4 +1256,599 @@ class PermisosApiTest extends TestCase
         $firmasPendientes = $solicitud->firmas()->where('estado_firma', 'pendiente')->count();
         $this->assertEquals(0, $firmasPendientes);
     }
+
+    /**
+     * Valida que el circuito de múltiples visadores (Adicional -> CESFAM -> DESAM)
+     * no se salte etapas cuando firma el Director CESFAM y conserve jornada, horario y motivo original.
+     */
+    public function test_circuito_multiple_visadores_no_salta_etapas_y_persiste_metadatos(): void
+    {
+        $payload = [
+            'insamu_user_id' => 'func.circuito@salud.cl',
+            'nombre_solicitante' => 'María Circuito',
+            'rut_solicitante' => '15.444.555-6',
+            'cargo_solicitante' => 'Enfermera',
+            'unidad_solicitante' => 'CESFAM Doñihue',
+            'tipo_permiso' => 'Permiso Administrativo',
+            'fecha_inicio' => '2026-11-10',
+            'fecha_fin' => '2026-11-10',
+            'dias_solicitados' => 0.5,
+            'jornada' => 'Tarde',
+            'insamu_visador_id' => 'jefe.some@salud.cl',
+            'nombre_visador' => 'Jefe SOME',
+            'cargo_visador' => 'Jefe Unidad',
+            'rol_firma' => 'visador_adicional',
+            'motivo' => 'Consulta médica especialista en la tarde',
+            'visadores' => [
+                [
+                    'rol' => 'visador_adicional',
+                    'rol_label' => 'Visador Adicional',
+                    'email' => 'jefe.some@salud.cl',
+                    'nombre' => 'Jefe SOME',
+                    'rut' => '10.111.222-3',
+                    'cargo' => 'Jefe Unidad',
+                    'es_subrogante' => false,
+                ],
+                [
+                    'rol' => 'direccion_cesfam',
+                    'rol_label' => 'Dirección CESFAM',
+                    'email' => 'director.cesfam@salud.cl',
+                    'nombre' => 'Directora CESFAM',
+                    'rut' => '12.222.333-4',
+                    'cargo' => 'Director/a CESFAM',
+                    'es_subrogante' => false,
+                ],
+                [
+                    'rol' => 'direccion_desam',
+                    'rol_label' => 'Dirección DESAM',
+                    'email' => 'director.desam@salud.cl',
+                    'nombre' => 'Director DESAM',
+                    'rut' => '13.333.444-5',
+                    'cargo' => 'Director/a DESAM',
+                    'es_subrogante' => false,
+                ],
+            ],
+        ];
+
+        $res = $this->withHeaders($this->headers())->postJson('/api/permisos', $payload);
+        $res->assertStatus(201)
+            ->assertJsonPath('data.jornada', 'Tarde')
+            ->assertJsonPath('data.estado', 'pendiente_visatura');
+
+        $solicitudId = $res->json('data.id');
+        $solicitud = PermisoSolicitud::with('firmas')->findOrFail($solicitudId);
+        $this->assertCount(3, $solicitud->firmas);
+        $this->assertCount(3, $solicitud->visadores);
+
+        // Paso 1: Firma Visador Adicional
+        $this->withHeaders($this->headers())->postJson('/api/firmas/confirmar', [
+            'permiso_id' => $solicitudId,
+            'insamu_visador_id' => 'jefe.some@salud.cl',
+            'accion' => 'aprobar',
+            'observaciones' => 'Visado por jefatura directa',
+        ])->assertStatus(200)
+            ->assertJsonPath('data.nuevo_estado', 'pendiente_visatura');
+
+        // Paso 2: Firma Dirección CESFAM (NO debe saltar a en_rrhh porque falta Dirección DESAM)
+        $this->withHeaders($this->headers())->postJson('/api/firmas/confirmar', [
+            'permiso_id' => $solicitudId,
+            'insamu_visador_id' => 'director.cesfam@salud.cl',
+            'accion' => 'aprobar',
+            'observaciones' => 'Visado por dirección CESFAM',
+        ])->assertStatus(200)
+            ->assertJsonPath('data.nuevo_estado', 'pendiente_direccion');
+
+        // Subrogar el 3er paso pendiente (Dirección DESAM) antes de la firma final
+        $this->withHeaders($this->headers())->putJson("/api/permisos/{$solicitudId}", [
+            'nuevo_visador_id' => 'subrogante.desam@salud.cl',
+            'nuevo_nombre_visador' => 'Subrogante DESAM',
+            'nuevo_rut_visador' => '14.555.666-7',
+            'nuevo_cargo_visador' => 'Director/a DESAM (S)',
+            'es_subrogante' => true,
+            'target_rol' => 'direccion_desam',
+        ])->assertStatus(200);
+
+        $solicitud->refresh();
+        $this->assertEquals('subrogante.desam@salud.cl', $solicitud->visadores[2]['email']);
+        $this->assertTrue($solicitud->visadores[2]['es_subrogante']);
+
+        // Paso 3: Firma Subrogante DESAM -> Ahora sí pasa a en_rrhh
+        $this->withHeaders($this->headers())->postJson('/api/firmas/confirmar', [
+            'permiso_id' => $solicitudId,
+            'insamu_visador_id' => 'subrogante.desam@salud.cl',
+            'accion' => 'aprobar',
+        ])->assertStatus(200)
+            ->assertJsonPath('data.nuevo_estado', 'en_rrhh');
+
+        // Anulación directa no debe sobrescribir el motivo original del permiso
+        $this->withHeaders($this->headers())->postJson("/api/permisos/{$solicitudId}/anular-directo", [
+            'insamu_user_id' => 'func.circuito@salud.cl',
+            'anulado_por' => 'María Circuito',
+            'motivo' => 'Se suspendió la hora médica',
+        ])->assertStatus(200)
+            ->assertJsonPath('data.estado', 'anulado')
+            ->assertJsonPath('data.motivo', 'Consulta médica especialista en la tarde')
+            ->assertJsonPath('data.motivo_anulacion', 'Se suspendió la hora médica');
+    }
+
+    /**
+     * Valida los topes de 30 días mensuales y 90 días anuales para Permiso Sin Goce de Remuneraciones.
+     */
+    public function test_topes_permiso_sin_goce_mensual_y_anual(): void
+    {
+        $verifInicial = $this->withHeaders($this->headers())
+            ->getJson('/api/saldos/func.singoce@salud.cl/verificar?anio=2026&mes=11&tipo_permiso=sin_goce');
+
+        $verifInicial->assertStatus(200)
+            ->assertJsonPath('data.dias_mes_disponibles', 30)
+            ->assertJsonPath('data.dias_anio_disponibles', 90);
+
+        // Solicitar 31 días en un mismo mes debe ser rechazado con 422
+        $resExcesoMes = $this->withHeaders($this->headers())->postJson('/api/permisos', [
+            'insamu_user_id' => 'func.singoce@salud.cl',
+            'tipo_permiso' => 'Permiso Sin Goce de Remuneraciones',
+            'fecha_inicio' => '2026-11-01',
+            'fecha_fin' => '2026-12-01',
+            'dias_solicitados' => 31.0,
+            'insamu_visador_id' => 'director@salud.cl',
+            'motivo' => 'Viaje personal',
+        ]);
+
+        $resExcesoMes->assertStatus(422);
+    }
+
+    /**
+     * Valida que dentro del Paso 1 (visadores directos) puedan firmar en cualquier orden,
+     * pero Dirección CESFAM (Paso 2) y Dirección DESAM (Paso 3) no puedan firmar antes de su etapa,
+     * ni el propio solicitante pueda auto-visar o auto-subrogarse.
+     */
+    public function test_etapas_jerarquicas_permiten_visadores_paso_1_en_cualquier_orden_y_bloquean_adelanto_de_direccion(): void
+    {
+        $payload = [
+            'insamu_user_id' => 'solicitante.etapas@salud.cl',
+            'nombre_solicitante' => 'Funcionario Etapas',
+            'rut_solicitante' => '18.111.222-3',
+            'cargo_solicitante' => 'Kinesiólogo',
+            'unidad_solicitante' => 'CESFAM Lo Miranda',
+            'tipo_permiso' => 'Permiso Administrativo',
+            'fecha_inicio' => '2026-11-15',
+            'fecha_fin' => '2026-11-15',
+            'dias_solicitados' => 1.0,
+            'insamu_visador_id' => 'visador1@salud.cl',
+            'rol_firma' => 'visador',
+            'motivo' => 'Trámite personal',
+            'visadores' => [
+                [
+                    'rol' => 'visador',
+                    'rol_label' => 'Visador 1',
+                    'email' => 'visador1@salud.cl',
+                    'nombre' => 'Jefe Directo 1',
+                    'rut' => '11.111.111-1',
+                    'cargo' => 'Jefe Programa',
+                ],
+                [
+                    'rol' => 'visador_adicional',
+                    'rol_label' => 'Visador 2',
+                    'email' => 'visador2@salud.cl',
+                    'nombre' => 'Jefe Directo 2',
+                    'rut' => '12.222.222-2',
+                    'cargo' => 'Coordinador Sector',
+                ],
+                [
+                    'rol' => 'direccion_cesfam',
+                    'rol_label' => 'Dirección CESFAM',
+                    'email' => 'dir.cesfam@salud.cl',
+                    'nombre' => 'Director CESFAM',
+                    'rut' => '13.333.333-3',
+                    'cargo' => 'Director CESFAM',
+                ],
+                [
+                    'rol' => 'direccion_desam',
+                    'rol_label' => 'Dirección DESAM',
+                    'email' => 'dir.desam@salud.cl',
+                    'nombre' => 'Director DESAM',
+                    'rut' => '14.444.444-4',
+                    'cargo' => 'Director DESAM',
+                ],
+            ],
+        ];
+
+        $res = $this->withHeaders($this->headers())->postJson('/api/permisos', $payload);
+        $res->assertStatus(201);
+        $solicitudId = $res->json('data.id');
+
+        // 1. Dirección CESFAM (Etapa 2) intenta firmar antes de que firmen los visadores de Etapa 1 -> Bloqueado (422)
+        $this->withHeaders($this->headers())->postJson('/api/firmas/confirmar', [
+            'permiso_id' => $solicitudId,
+            'insamu_visador_id' => 'dir.cesfam@salud.cl',
+            'accion' => 'aprobar',
+        ])->assertStatus(422);
+
+        // 2. Dirección DESAM (Etapa 3) intenta firmar antes de Etapas 1 y 2 -> Bloqueado (422)
+        $this->withHeaders($this->headers())->postJson('/api/firmas/confirmar', [
+            'permiso_id' => $solicitudId,
+            'insamu_visador_id' => 'dir.desam@salud.cl',
+            'accion' => 'aprobar',
+        ])->assertStatus(422);
+
+        // 3. Usuario ajeno al circuito intenta firmar -> Bloqueado (422)
+        $this->withHeaders($this->headers())->postJson('/api/firmas/confirmar', [
+            'permiso_id' => $solicitudId,
+            'insamu_visador_id' => 'intruso@salud.cl',
+            'accion' => 'aprobar',
+        ])->assertStatus(422);
+
+        // 4. El solicitante intenta subrogar un paso poniéndose a sí mismo o a otro visador ya presente -> Bloqueado (422)
+        $this->withHeaders($this->headers())->putJson("/api/permisos/{$solicitudId}", [
+            'nuevo_visador_id' => 'solicitante.etapas@salud.cl',
+            'target_orden' => 1,
+        ])->assertStatus(422);
+
+        $this->withHeaders($this->headers())->putJson("/api/permisos/{$solicitudId}", [
+            'nuevo_visador_id' => 'visador2@salud.cl',
+            'target_orden' => 1,
+        ])->assertStatus(422);
+
+        // 5. Visador 2 (orden 2, Etapa 1) firma PRIMERO que Visador 1 -> Permitido y sigue en pendiente_visatura
+        $this->withHeaders($this->headers())->postJson('/api/firmas/confirmar', [
+            'permiso_id' => $solicitudId,
+            'insamu_visador_id' => 'visador2@salud.cl',
+            'accion' => 'aprobar',
+        ])->assertStatus(200)
+            ->assertJsonPath('data.nuevo_estado', 'pendiente_visatura');
+
+        // Dirección CESFAM aún no puede firmar porque falta Visador 1 de la Etapa 1
+        $this->withHeaders($this->headers())->postJson('/api/firmas/confirmar', [
+            'permiso_id' => $solicitudId,
+            'insamu_visador_id' => 'dir.cesfam@salud.cl',
+            'accion' => 'aprobar',
+        ])->assertStatus(422);
+
+        // 6. Ahora firma Visador 1 (Etapa 1 completa) -> Avanza a Etapa 2 (Dirección CESFAM), sigue en pendiente_visatura
+        $this->withHeaders($this->headers())->postJson('/api/firmas/confirmar', [
+            'permiso_id' => $solicitudId,
+            'insamu_visador_id' => 'visador1@salud.cl',
+            'accion' => 'aprobar',
+        ])->assertStatus(200)
+            ->assertJsonPath('data.nuevo_estado', 'pendiente_visatura');
+
+        // Dirección DESAM aún no puede firmar porque falta Etapa 2 (Dirección CESFAM)
+        $this->withHeaders($this->headers())->postJson('/api/firmas/confirmar', [
+            'permiso_id' => $solicitudId,
+            'insamu_visador_id' => 'dir.desam@salud.cl',
+            'accion' => 'aprobar',
+        ])->assertStatus(422);
+
+        // 7. Firma Dirección CESFAM (Etapa 2 completa) -> Ahora pasa a pendiente_direccion (Etapa 3 activa)
+        $this->withHeaders($this->headers())->postJson('/api/firmas/confirmar', [
+            'permiso_id' => $solicitudId,
+            'insamu_visador_id' => 'dir.cesfam@salud.cl',
+            'accion' => 'aprobar',
+        ])->assertStatus(200)
+            ->assertJsonPath('data.nuevo_estado', 'pendiente_direccion');
+
+        // 8. Firma Dirección DESAM (Etapa 3 completa) -> Pasa a en_rrhh
+        $this->withHeaders($this->headers())->postJson('/api/firmas/confirmar', [
+            'permiso_id' => $solicitudId,
+            'insamu_visador_id' => 'dir.desam@salud.cl',
+            'accion' => 'aprobar',
+        ])->assertStatus(200)
+            ->assertJsonPath('data.nuevo_estado', 'en_rrhh');
+    }
+
+    /**
+     * Valida que actualizar los topes de saldos desde RRHH nunca sobrescriba dias_usados.
+     */
+    public function test_actualizar_topes_saldos_no_sobrescribe_dias_usados(): void
+    {
+        PermisoSaldo::create([
+            'insamu_user_id' => 'func.saldos@salud.cl',
+            'anio' => 2026,
+            'tipo_permiso' => PermisoSaldo::TIPO_FERIADO_LEGAL,
+            'unidad' => PermisoSaldo::UNIDAD_DIAS,
+            'dias_totales' => 15.0,
+            'dias_usados' => 5.0,
+        ]);
+
+        PermisoSaldo::create([
+            'insamu_user_id' => 'func.saldos@salud.cl',
+            'anio' => 2026,
+            'tipo_permiso' => PermisoSaldo::TIPO_ADMINISTRATIVO,
+            'unidad' => PermisoSaldo::UNIDAD_DIAS,
+            'dias_totales' => 6.0,
+            'dias_usados' => 2.5,
+        ]);
+
+        $this->withHeaders($this->headers())->postJson('/api/rrhh/saldos/inicializar', [
+            'insamu_user_id' => 'func.saldos@salud.cl',
+            'anio' => 2026,
+            'dias_feriado_legal' => 20.0,
+            'dias_administrativos' => 5.0,
+        ])->assertStatus(200);
+
+        $feriado = PermisoSaldo::where('insamu_user_id', 'func.saldos@salud.cl')
+            ->where('anio', 2026)
+            ->where('tipo_permiso', PermisoSaldo::TIPO_FERIADO_LEGAL)
+            ->firstOrFail();
+
+        $admin = PermisoSaldo::where('insamu_user_id', 'func.saldos@salud.cl')
+            ->where('anio', 2026)
+            ->where('tipo_permiso', PermisoSaldo::TIPO_ADMINISTRATIVO)
+            ->firstOrFail();
+
+        $this->assertEquals(20.0, (float) $feriado->dias_totales);
+        $this->assertEquals(5.0, (float) $feriado->dias_usados);
+        $this->assertEquals(15.0, (float) $feriado->cantidad_disponible);
+
+        $this->assertEquals(5.0, (float) $admin->dias_totales);
+        $this->assertEquals(2.5, (float) $admin->dias_usados);
+        $this->assertEquals(2.5, (float) $admin->cantidad_disponible);
+    }
+
+    /**
+     * Verificar que no se puede decretar una solicitud si se encuentra en estado pendiente, anulado o rechazado.
+     */
+    public function test_no_se_puede_decretar_solicitud_en_estado_invalido(): void
+    {
+        $solicitudPendiente = PermisoSolicitud::create([
+            'insamu_user_id' => 'USR_DECRETO_TEST',
+            'tipo_permiso' => 'Permiso Administrativo',
+            'fecha_inicio' => '2026-06-01',
+            'fecha_fin' => '2026-06-01',
+            'dias_solicitados' => 1.0,
+            'estado' => PermisoSolicitud::ESTADO_PENDIENTE_VISATURA,
+        ]);
+
+        $resPendiente = $this->withHeaders($this->headers())
+            ->postJson("/api/rrhh/permisos/{$solicitudPendiente->id}/decretar", [
+                'decreto_numero' => 'DEC-INVALID-1',
+            ]);
+        $resPendiente->assertStatus(422)
+            ->assertJsonPath('status', 'error');
+
+        $solicitudAnulada = PermisoSolicitud::create([
+            'insamu_user_id' => 'USR_DECRETO_TEST_2',
+            'tipo_permiso' => 'Permiso Administrativo',
+            'fecha_inicio' => '2026-06-02',
+            'fecha_fin' => '2026-06-02',
+            'dias_solicitados' => 1.0,
+            'estado' => PermisoSolicitud::ESTADO_ANULADO,
+        ]);
+
+        $resAnulada = $this->withHeaders($this->headers())
+            ->postJson("/api/rrhh/permisos/{$solicitudAnulada->id}/decretar", [
+                'decreto_numero' => 'DEC-INVALID-2',
+            ]);
+        $resAnulada->assertStatus(422)
+            ->assertJsonPath('status', 'error');
+    }
+
+    /**
+     * Verificar que SaldoController::upsert y masivo preservan días usados existentes si no se especifican.
+     */
+    public function test_saldo_upsert_y_masivo_preservan_dias_usados_si_no_se_especifican(): void
+    {
+        PermisoSaldo::create([
+            'insamu_user_id' => 'preservar.usados@salud.cl',
+            'anio' => 2026,
+            'tipo_permiso' => PermisoSaldo::TIPO_FERIADO_LEGAL,
+            'unidad' => PermisoSaldo::UNIDAD_DIAS,
+            'dias_totales' => 15.0,
+            'dias_usados' => 4.0,
+        ]);
+
+        // Upsert sin enviar dias_usados
+        $this->withHeaders($this->headers())->postJson('/api/saldos', [
+            'insamu_user_id' => 'preservar.usados@salud.cl',
+            'anio' => 2026,
+            'tipo_permiso' => 'feriado_legal',
+            'dias_totales' => 20.0,
+        ])->assertStatus(200);
+
+        $saldo = PermisoSaldo::where('insamu_user_id', 'preservar.usados@salud.cl')
+            ->where('anio', 2026)
+            ->where('tipo_permiso', PermisoSaldo::TIPO_FERIADO_LEGAL)
+            ->firstOrFail();
+
+        $this->assertEquals(20.0, (float) $saldo->dias_totales);
+        $this->assertEquals(4.0, (float) $saldo->dias_usados);
+
+        // Masivo sin enviar dias_usados
+        $this->withHeaders($this->headers())->postJson('/api/saldos/masivo', [
+            'anio' => 2026,
+            'records' => [
+                [
+                    'insamu_user_id' => 'preservar.usados@salud.cl',
+                    'tipo_permiso' => 'feriado_legal',
+                    'dias_totales' => 25.0,
+                ],
+            ],
+        ])->assertStatus(200);
+
+        $saldo->refresh();
+        $this->assertEquals(25.0, (float) $saldo->dias_totales);
+        $this->assertEquals(4.0, (float) $saldo->dias_usados);
+    }
+
+    /**
+     * Verificar que solo el funcionario solicitante puede subrogar o anular cuando se provee insamu_user_id.
+     */
+    public function test_subrogar_y_anular_validan_funcionario_creador(): void
+    {
+        $solicitud = PermisoSolicitud::create([
+            'insamu_user_id' => 'funcionario.legitimo@salud.cl',
+            'nombre_solicitante' => 'Funcionario Legítimo',
+            'tipo_permiso' => 'Permiso Administrativo',
+            'fecha_inicio' => '2026-07-01',
+            'fecha_fin' => '2026-07-01',
+            'dias_solicitados' => 1.0,
+            'estado' => PermisoSolicitud::ESTADO_PENDIENTE_VISATURA,
+        ]);
+
+        PermisoTrazabilidadFirma::create([
+            'permiso_id' => $solicitud->id,
+            'orden' => 1,
+            'insamu_visador_id' => 'visador1@salud.cl',
+            'nombre_visador' => 'Visador 1',
+            'cargo_visador' => 'Jefe',
+            'rol_firma' => 'Visador',
+            'estado_firma' => 'pendiente',
+            'token_correo' => PermisoTrazabilidadFirma::generarToken(),
+        ]);
+
+        // Intento de subrogar por otro usuario no dueño
+        $resSubrog = $this->withHeaders($this->headers())
+            ->postJson("/api/permisos/{$solicitud->id}/subrogar-visador", [
+                'insamu_user_id' => 'impostor@salud.cl',
+                'nuevo_visador_id' => 'nuevo.visador@salud.cl',
+            ]);
+        $resSubrog->assertStatus(422)
+            ->assertJsonPath('status', 'error');
+
+        // Intento de anular por otro usuario no dueño
+        $resAnular = $this->withHeaders($this->headers())
+            ->postJson("/api/permisos/{$solicitud->id}/anular-directo", [
+                'insamu_user_id' => 'impostor@salud.cl',
+                'motivo' => 'Anulación fraudulenta',
+            ]);
+        $resAnular->assertStatus(422)
+            ->assertJsonPath('status', 'error');
+    }
+
+    /**
+     * Valida reglas de solapamiento:
+     * - Si se pide día completo, no se puede combinar con nada en la misma fecha.
+     * - Si ya existe día completo, no se puede pedir nada adicional en esa fecha.
+     * - Si son parciales (medio día + horas compensadas), sí se permite la combinación para salir más temprano.
+     * - No se pueden pedir dos medios días del mismo turno (ej. mañana + mañana).
+     * - Los permisos anulados o rechazados no bloquean nuevas solicitudes.
+     */
+    public function test_solapamiento_de_fechas_reglas_de_jornada_completa_y_combinatoria_parcial(): void
+    {
+        $userId = 'funcionario.solap@salud.cl';
+
+        // 1. Inicializar saldos para las pruebas
+        PermisoSaldo::create([
+            'insamu_user_id' => $userId,
+            'anio' => 2026,
+            'tipo_permiso' => PermisoSaldo::TIPO_ADMINISTRATIVO,
+            'unidad' => PermisoSaldo::UNIDAD_DIAS,
+            'dias_totales' => 6.0,
+            'dias_usados' => 0.0,
+        ]);
+
+        PermisoSaldo::create([
+            'insamu_user_id' => $userId,
+            'anio' => 2026,
+            'tipo_permiso' => PermisoSaldo::TIPO_COMPENSACION_TIEMPO,
+            'unidad' => PermisoSaldo::UNIDAD_HORAS,
+            'dias_totales' => 10.0,
+            'dias_usados' => 0.0,
+        ]);
+
+        // A: Crear medio día administrativo en la mañana para el 2026-11-10
+        $resMedioDia = $this->withHeaders($this->headers())->postJson('/api/permisos', [
+            'insamu_user_id' => $userId,
+            'tipo_permiso' => 'Permiso Administrativo',
+            'fecha_inicio' => '2026-11-10',
+            'fecha_fin' => '2026-11-10',
+            'dias_solicitados' => 0.5,
+            'jornada' => 'Mañana',
+            'motivo' => 'Trámite médico en la mañana',
+            'insamu_visador_id' => 'jefe@salud.cl',
+        ]);
+        $resMedioDia->assertStatus(201);
+
+        // B: Intentar solicitar día completo el mismo 2026-11-10 -> DEBE BLOQUEARSE
+        $resDiaCompletoFallo = $this->withHeaders($this->headers())->postJson('/api/permisos', [
+            'insamu_user_id' => $userId,
+            'tipo_permiso' => 'Permiso Administrativo',
+            'fecha_inicio' => '2026-11-10',
+            'fecha_fin' => '2026-11-10',
+            'dias_solicitados' => 1.0,
+            'jornada' => 'Completa',
+            'motivo' => 'Día completo no compatible con medio día',
+            'insamu_visador_id' => 'jefe@salud.cl',
+        ]);
+        $resDiaCompletoFallo->assertStatus(422)
+            ->assertJsonPath('status', 'error');
+
+        // C: Solicitar compensación de horas para la tarde del mismo día (ej. 15:00 a 17:00) -> DEBE PERMITIRSE
+        $resHorasExito = $this->withHeaders($this->headers())->postJson('/api/permisos', [
+            'insamu_user_id' => $userId,
+            'tipo_permiso' => 'Compensación de Tiempo',
+            'fecha_inicio' => '2026-11-10',
+            'fecha_fin' => '2026-11-10',
+            'dias_solicitados' => 0.0,
+            'horas_solicitadas' => 2.0,
+            'jornada' => 'Horas',
+            'hora_desde' => '15:00',
+            'hora_hasta' => '17:00',
+            'motivo' => 'Compensación para salir aún más temprano',
+            'insamu_visador_id' => 'jefe@salud.cl',
+        ]);
+        $resHorasExito->assertStatus(201);
+
+        // D: Intentar pedir otro medio día en la mañana para el mismo día -> DEBE BLOQUEARSE
+        $resOtroMananaFallo = $this->withHeaders($this->headers())->postJson('/api/permisos', [
+            'insamu_user_id' => $userId,
+            'tipo_permiso' => 'Permiso Administrativo',
+            'fecha_inicio' => '2026-11-10',
+            'fecha_fin' => '2026-11-10',
+            'dias_solicitados' => 0.5,
+            'jornada' => 'Mañana',
+            'motivo' => 'Otra mañana en el mismo día',
+            'insamu_visador_id' => 'jefe@salud.cl',
+        ]);
+        $resOtroMananaFallo->assertStatus(422);
+
+        // E: Crear día completo el 2026-11-20
+        $resDiaCompleto = $this->withHeaders($this->headers())->postJson('/api/permisos', [
+            'insamu_user_id' => $userId,
+            'tipo_permiso' => 'Permiso Administrativo',
+            'fecha_inicio' => '2026-11-20',
+            'fecha_fin' => '2026-11-20',
+            'dias_solicitados' => 1.0,
+            'jornada' => 'Completa',
+            'motivo' => 'Día completo de asuntos personales',
+            'insamu_visador_id' => 'jefe@salud.cl',
+        ]);
+        $resDiaCompleto->assertStatus(201);
+
+        // F: Intentar pedir horas compensadas en el día 2026-11-20 que ya tiene día completo -> DEBE BLOQUEARSE
+        $resHorasSobreDiaCompleto = $this->withHeaders($this->headers())->postJson('/api/permisos', [
+            'insamu_user_id' => $userId,
+            'tipo_permiso' => 'Compensación de Tiempo',
+            'fecha_inicio' => '2026-11-20',
+            'fecha_fin' => '2026-11-20',
+            'dias_solicitados' => 0.0,
+            'horas_solicitadas' => 1.0,
+            'jornada' => 'Horas',
+            'hora_desde' => '14:00',
+            'hora_hasta' => '15:00',
+            'motivo' => 'Horas sobre día completo',
+            'insamu_visador_id' => 'jefe@salud.cl',
+        ]);
+        $resHorasSobreDiaCompleto->assertStatus(422);
+
+        // G: Si anulamos el día completo del 2026-11-20, entonces SÍ debe permitir solicitarlo nuevamente
+        $diaCompletoId = $resDiaCompleto->json('data.id');
+        $this->withHeaders($this->headers())->postJson("/api/permisos/{$diaCompletoId}/anular-directo", [
+            'insamu_user_id' => $userId,
+            'motivo' => 'Anulación voluntaria',
+        ])->assertStatus(200);
+
+        // Ahora el 2026-11-20 está libre y debe permitir crearlo
+        $resRecreado = $this->withHeaders($this->headers())->postJson('/api/permisos', [
+            'insamu_user_id' => $userId,
+            'tipo_permiso' => 'Permiso Administrativo',
+            'fecha_inicio' => '2026-11-20',
+            'fecha_fin' => '2026-11-20',
+            'dias_solicitados' => 1.0,
+            'jornada' => 'Completa',
+            'motivo' => 'Recreando en fecha liberada tras anulación',
+            'insamu_visador_id' => 'jefe@salud.cl',
+        ]);
+        $resRecreado->assertStatus(201);
+    }
 }

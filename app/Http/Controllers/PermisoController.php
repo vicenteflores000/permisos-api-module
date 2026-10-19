@@ -30,39 +30,41 @@ class PermisoController extends Controller
     {
         $query = PermisoSolicitud::with(['firmas']);
 
-        if ($request->filled('insamu_user_id')) {
-            $userId = (string) $request->query('insamu_user_id');
-            $userLower = strtolower(trim($userId));
-            $cleanRut = preg_replace('/[^0-9kK]/', '', $userId);
+        if ($request->filled('insamu_user_id') || $request->filled('rut_solicitante') || $request->filled('rut')) {
+            $userId = trim((string) $request->query('insamu_user_id', ''));
+            $userLower = strtolower($userId);
+            $rutParam = trim((string) ($request->query('rut_solicitante') ?? $request->query('rut') ?? ''));
+            $cleanRut = preg_replace('/[^0-9kK]/', '', $rutParam !== '' ? $rutParam : $userId);
 
-            $query->where(function ($q) use ($userId, $userLower, $cleanRut) {
-                $q->where('insamu_user_id', $userId)
-                    ->orWhereRaw('LOWER(insamu_user_id) = ?', [$userLower])
-                    ->orWhere('rut_solicitante', $userId);
+            $query->where(function ($q) use ($userId, $userLower, $rutParam, $cleanRut) {
+                if ($userId !== '') {
+                    $q->where('insamu_user_id', $userId)
+                        ->orWhereRaw('LOWER(insamu_user_id) = ?', [$userLower])
+                        ->orWhere('rut_solicitante', $userId);
+                }
+
+                if ($rutParam !== '') {
+                    $q->orWhere('rut_solicitante', $rutParam)
+                        ->orWhere('insamu_user_id', $rutParam);
+                }
 
                 if (! empty($cleanRut)) {
                     $q->orWhere('insamu_user_id', $cleanRut)
-                        ->orWhereRaw("REPLACE(REPLACE(rut_solicitante, '.', ''), '-', '') = ?", [$cleanRut]);
-                }
-            });
-        }
-
-        if ($request->filled('rut_solicitante')) {
-            $rut = (string) $request->query('rut_solicitante');
-            $cleanRut = preg_replace('/[^0-9kK]/', '', $rut);
-
-            $query->where(function ($q) use ($rut, $cleanRut) {
-                $q->where('rut_solicitante', $rut)
-                    ->orWhere('insamu_user_id', $rut);
-
-                if (! empty($cleanRut)) {
-                    $q->orWhereRaw("REPLACE(REPLACE(rut_solicitante, '.', ''), '-', '') = ?", [$cleanRut]);
+                        ->orWhereRaw("REPLACE(REPLACE(LOWER(rut_solicitante), '.', ''), '-', '') = ?", [strtolower($cleanRut)])
+                        ->orWhereRaw("REPLACE(REPLACE(LOWER(insamu_user_id), '.', ''), '-', '') = ?", [strtolower($cleanRut)]);
                 }
             });
         }
 
         if ($request->filled('estado')) {
             $query->where('estado', $request->query('estado'));
+        }
+
+        if ($request->filled('visador_id')) {
+            $visId = strtolower(trim((string) $request->query('visador_id')));
+            $query->whereHas('firmas', function ($q) use ($visId) {
+                $q->whereRaw('LOWER(insamu_visador_id) = ?', [$visId]);
+            });
         }
 
         if ($request->filled('anio')) {
@@ -95,6 +97,13 @@ class PermisoController extends Controller
      */
     public function store(Request $request): JsonResponse
     {
+        if (is_string($request->input('visadores'))) {
+            $decodedVisadores = json_decode($request->input('visadores'), true);
+            if (is_array($decodedVisadores)) {
+                $request->merge(['visadores' => $decodedVisadores]);
+            }
+        }
+
         // Cálculo Simple de Fechas: Se descarta la integración de calendarios de feriados nacionales.
         // La API confía plenamente en la cantidad enviada por el frontend (dias_solicitados u horas_solicitadas)
         // y los descuenta linealmente del saldo del funcionario.
@@ -109,6 +118,10 @@ class PermisoController extends Controller
             'fecha_fin' => 'required|date|after_or_equal:fecha_inicio',
             'dias_solicitados' => 'nullable|numeric|min:0',
             'horas_solicitadas' => 'nullable|numeric|min:0.5',
+            'jornada' => 'nullable|string|max:32',
+            'hora_desde' => 'nullable|string|max:16',
+            'hora_hasta' => 'nullable|string|max:16',
+            'parentesco_fallecimiento' => 'nullable|string|max:64',
             'insamu_visador_id' => 'required|string|max:64',
             'nombre_visador' => 'nullable|string|max:255',
             'rut_visador' => 'nullable|string|max:20',
@@ -117,6 +130,9 @@ class PermisoController extends Controller
             'motivo' => 'nullable|string|max:1000',
             'archivo' => [
                 Rule::requiredIf(function () use ($request) {
+                    if ($request->filled('archivo_adjunto_url')) {
+                        return false;
+                    }
                     $slug = Str::slug($request->input('tipo_permiso', ''), '_');
 
                     return in_array($slug, [
@@ -133,6 +149,7 @@ class PermisoController extends Controller
                 'max:10240',
             ],
             'archivo_adjunto_url' => 'nullable|string|max:500',
+            'archivo_adjunto_nombre' => 'nullable|string|max:255',
             'visadores' => 'nullable|array',
         ], [
             'archivo.required' => 'El archivo adjunto es obligatorio para solicitudes de tipo fallecimiento familiar, nacimiento de hijo o capacitación autogestionada.',
@@ -148,7 +165,11 @@ class PermisoController extends Controller
 
         // Si se envió un archivo adjunto, se almacena de forma segura con UUID
         if ($request->hasFile('archivo')) {
-            $validados['archivo_adjunto_url'] = $this->almacenarArchivoAdjunto($request->file('archivo'));
+            $archivoSubido = $request->file('archivo');
+            $validados['archivo_adjunto_url'] = $this->almacenarArchivoAdjunto($archivoSubido);
+            if (empty($validados['archivo_adjunto_nombre'])) {
+                $validados['archivo_adjunto_nombre'] = $archivoSubido->getClientOriginalName();
+            }
         }
 
         try {
@@ -161,9 +182,10 @@ class PermisoController extends Controller
             ], 201);
         } catch (ValidationException $e) {
             $errores = $e->errors();
+            $primerError = ! empty($errores) ? collect($errores)->flatten()->first() : null;
             $mensaje = isset($errores['saldo'])
                 ? $errores['saldo'][0]
-                : (isset($errores['archivo']) ? $errores['archivo'][0] : ($e->validator?->errors()->first() ?: 'Error de validación de saldo o datos.'));
+                : (isset($errores['archivo']) ? $errores['archivo'][0] : ($primerError ?: 'Error de validación de saldo o datos.'));
 
             return response()->json([
                 'status' => 'error',
@@ -216,10 +238,15 @@ class PermisoController extends Controller
         }
 
         $validados = $request->validate([
+            'insamu_user_id' => 'nullable|string|max:64',
             'nuevo_visador_id' => 'required|string|max:64',
             'nuevo_nombre_visador' => 'nullable|string|max:255',
             'nuevo_rut_visador' => 'nullable|string|max:20',
             'nuevo_cargo_visador' => 'nullable|string|max:255',
+            'es_subrogante' => 'nullable|boolean',
+            'target_visador_email' => 'nullable|string|max:128',
+            'target_rol' => 'nullable|string|max:64',
+            'target_orden' => 'nullable|integer',
         ]);
 
         try {
@@ -292,6 +319,7 @@ class PermisoController extends Controller
 
         $validados = $request->validate([
             'insamu_user_id' => 'nullable|string|max:64',
+            'anulado_por' => 'nullable|string|max:128',
             'motivo' => 'nullable|string|max:1000',
         ]);
 
@@ -329,6 +357,7 @@ class PermisoController extends Controller
 
         $validados = $request->validate([
             'insamu_user_id' => 'nullable|string|max:64',
+            'anulado_por' => 'nullable|string|max:128',
             'motivo' => 'nullable|string|max:1000',
             'accion' => 'nullable|string|max:32',
         ]);

@@ -43,6 +43,7 @@ Route::middleware(['insamu.auth'])->group(function () {
 
         // Lógica de Anulación (Funcionario)
         Route::post('/{id}/anular', [PermisoController::class, 'anularDirecto']);
+        Route::post('/{id}/anular-directo', [PermisoController::class, 'anularDirecto']);
         Route::post('/{id}/solicitar-anulacion', [PermisoController::class, 'solicitarAnulacion']);
 
         // Generación y descarga de PDF inalterable
@@ -75,9 +76,11 @@ Route::middleware(['insamu.auth'])->group(function () {
 
     // Saldos de Permisos y Verificación
     Route::prefix('saldos')->group(function () {
+        Route::get('/', [SaldoController::class, 'index']);
         Route::get('/{userId}', [SaldoController::class, 'show']);
         Route::get('/{userId}/verificar', [RrhhSaldoController::class, 'verificarSaldo']);
         Route::post('/', [SaldoController::class, 'upsert']);
+        Route::post('/masivo', [SaldoController::class, 'masivo']);
         Route::post('/acumular-compensacion', [SaldoController::class, 'acumularCompensacion']);
     });
 

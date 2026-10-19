@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\LogSistema;
 use App\Models\PermisoSaldo;
+use App\Services\PermisoService;
 use Exception;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -21,42 +22,78 @@ class RrhhSaldoController extends Controller
             'insamu_user_id' => 'required|string|max:64',
             'anio' => 'required|integer|min:2000|max:2100',
             'dias_feriado_legal' => 'required|numeric|min:0',
+            'dias_administrativos' => 'nullable|numeric|min:0|max:6',
             'horas_compensacion' => 'nullable|numeric|min:0',
             'insamu_rrhh_user_id' => 'nullable|string|max:64',
         ]);
 
-        $userId = $validados['insamu_user_id'];
+        $userId = trim((string) $validados['insamu_user_id']);
+        $userIdLower = strtolower($userId);
         $anio = (int) $validados['anio'];
         $rrhhId = $validados['insamu_rrhh_user_id'] ?? 'RRHH_OFFICER';
 
-        $saldosActualizados = DB::transaction(function () use ($validados, $userId, $anio, $rrhhId) {
+        $saldosActualizados = DB::transaction(function () use ($validados, $userId, $userIdLower, $anio, $rrhhId) {
             $resultados = [];
 
             // 1. Feriado Legal (Vacaciones - con variabilidad ej: 15, 20 o 25 días)
+            $existenteFeriado = PermisoSaldo::whereRaw('LOWER(insamu_user_id) = ?', [$userIdLower])
+                ->where('anio', $anio)
+                ->where('tipo_permiso', PermisoSaldo::TIPO_FERIADO_LEGAL)
+                ->first();
+
             $saldoFeriado = PermisoSaldo::updateOrCreate(
                 [
-                    'insamu_user_id' => $userId,
+                    'insamu_user_id' => $existenteFeriado ? $existenteFeriado->insamu_user_id : $userId,
                     'anio' => $anio,
                     'tipo_permiso' => PermisoSaldo::TIPO_FERIADO_LEGAL,
                 ],
                 [
                     'unidad' => PermisoSaldo::UNIDAD_DIAS,
                     'dias_totales' => (float) $validados['dias_feriado_legal'],
+                    'dias_usados' => $existenteFeriado ? (float) $existenteFeriado->dias_usados : 0.0,
                 ]
             );
             $resultados[] = $saldoFeriado;
 
-            // 2. Compensación de Tiempo (Opcional)
+            // 2. Días Administrativos (Opcional si RRHH ajusta el tope)
+            if (isset($validados['dias_administrativos'])) {
+                $existenteAdmin = PermisoSaldo::whereRaw('LOWER(insamu_user_id) = ?', [$userIdLower])
+                    ->where('anio', $anio)
+                    ->where('tipo_permiso', PermisoSaldo::TIPO_ADMINISTRATIVO)
+                    ->first();
+
+                $saldoAdmin = PermisoSaldo::updateOrCreate(
+                    [
+                        'insamu_user_id' => $existenteAdmin ? $existenteAdmin->insamu_user_id : $userId,
+                        'anio' => $anio,
+                        'tipo_permiso' => PermisoSaldo::TIPO_ADMINISTRATIVO,
+                    ],
+                    [
+                        'unidad' => PermisoSaldo::UNIDAD_DIAS,
+                        'dias_totales' => (float) $validados['dias_administrativos'],
+                        'dias_usados' => $existenteAdmin ? (float) $existenteAdmin->dias_usados : 0.0,
+                    ]
+                );
+                $resultados[] = $saldoAdmin;
+            }
+
+            // 3. Compensación de Tiempo (Opcional)
             if (isset($validados['horas_compensacion'])) {
+                $existenteComp = PermisoSaldo::whereRaw('LOWER(insamu_user_id) = ?', [$userIdLower])
+                    ->where('anio', $anio)
+                    ->where('tipo_permiso', PermisoSaldo::TIPO_COMPENSACION_TIEMPO)
+                    ->first();
+
                 $saldoComp = PermisoSaldo::updateOrCreate(
                     [
-                        'insamu_user_id' => $userId,
+                        'insamu_user_id' => $existenteComp ? $existenteComp->insamu_user_id : $userId,
                         'anio' => $anio,
                         'tipo_permiso' => PermisoSaldo::TIPO_COMPENSACION_TIEMPO,
                     ],
                     [
                         'unidad' => PermisoSaldo::UNIDAD_HORAS,
                         'dias_totales' => (float) $validados['horas_compensacion'],
+                        'dias_usados' => $existenteComp ? (float) $existenteComp->dias_usados : 0.0,
                     ]
                 );
                 $resultados[] = $saldoComp;
@@ -71,6 +108,7 @@ class RrhhSaldoController extends Controller
                     'funcionario_id' => $userId,
                     'anio' => $anio,
                     'dias_feriado_legal' => $validados['dias_feriado_legal'],
+                    'dias_administrativos' => $validados['dias_administrativos'] ?? null,
                     'horas_compensacion' => $validados['horas_compensacion'] ?? null,
                     'nota' => 'Días administrativos asignados automáticamente por Cron Job anual el 1 de enero',
                 ]
@@ -98,6 +136,7 @@ class RrhhSaldoController extends Controller
             'saldos.*.insamu_user_id' => 'required_with:saldos|string|max:64',
             'saldos.*.anio' => 'required_with:saldos|integer|min:2000|max:2100',
             'saldos.*.dias_feriado_legal' => 'required_with:saldos|numeric|min:0',
+            'saldos.*.dias_administrativos' => 'nullable|numeric|min:0|max:6',
             'saldos.*.horas_compensacion' => 'nullable|numeric|min:0',
             'insamu_rrhh_user_id' => 'nullable|string|max:64',
             'anio_defecto' => 'nullable|integer|min:2000|max:2100',
@@ -134,6 +173,7 @@ class RrhhSaldoController extends Controller
             foreach ($filas as $indice => $fila) {
                 try {
                     $userId = trim((string) ($fila['insamu_user_id'] ?? $fila['rut'] ?? $fila['id_funcionario'] ?? ''));
+                    $userIdLower = strtolower($userId);
                     $anio = (int) ($fila['anio'] ?? $request->input('anio_defecto', now()->year));
 
                     if (empty($userId)) {
@@ -144,29 +184,62 @@ class RrhhSaldoController extends Controller
 
                     // Feriado Legal (Vacaciones: obligatorio en la planilla masiva)
                     $feriado = isset($fila['dias_feriado_legal']) ? (float) $fila['dias_feriado_legal'] : 15.0;
+                    $existenteFeriado = PermisoSaldo::whereRaw('LOWER(insamu_user_id) = ?', [$userIdLower])
+                        ->where('anio', $anio)
+                        ->where('tipo_permiso', PermisoSaldo::TIPO_FERIADO_LEGAL)
+                        ->first();
+
                     PermisoSaldo::updateOrCreate(
                         [
-                            'insamu_user_id' => $userId,
+                            'insamu_user_id' => $existenteFeriado ? $existenteFeriado->insamu_user_id : $userId,
                             'anio' => $anio,
                             'tipo_permiso' => PermisoSaldo::TIPO_FERIADO_LEGAL,
                         ],
                         [
                             'unidad' => PermisoSaldo::UNIDAD_DIAS,
                             'dias_totales' => $feriado,
+                            'dias_usados' => $existenteFeriado ? (float) $existenteFeriado->dias_usados : 0.0,
                         ]
                     );
 
-                    // Compensación opcional
-                    if (isset($fila['horas_compensacion']) && $fila['horas_compensacion'] !== '') {
+                    // Días Administrativos opcional
+                    if (isset($fila['dias_administrativos']) && $fila['dias_administrativos'] !== '') {
+                        $existenteAdmin = PermisoSaldo::whereRaw('LOWER(insamu_user_id) = ?', [$userIdLower])
+                            ->where('anio', $anio)
+                            ->where('tipo_permiso', PermisoSaldo::TIPO_ADMINISTRATIVO)
+                            ->first();
+
                         PermisoSaldo::updateOrCreate(
                             [
-                                'insamu_user_id' => $userId,
+                                'insamu_user_id' => $existenteAdmin ? $existenteAdmin->insamu_user_id : $userId,
+                                'anio' => $anio,
+                                'tipo_permiso' => PermisoSaldo::TIPO_ADMINISTRATIVO,
+                            ],
+                            [
+                                'unidad' => PermisoSaldo::UNIDAD_DIAS,
+                                'dias_totales' => (float) $fila['dias_administrativos'],
+                                'dias_usados' => $existenteAdmin ? (float) $existenteAdmin->dias_usados : 0.0,
+                            ]
+                        );
+                    }
+
+                    // Compensación opcional
+                    if (isset($fila['horas_compensacion']) && $fila['horas_compensacion'] !== '') {
+                        $existenteComp = PermisoSaldo::whereRaw('LOWER(insamu_user_id) = ?', [$userIdLower])
+                            ->where('anio', $anio)
+                            ->where('tipo_permiso', PermisoSaldo::TIPO_COMPENSACION_TIEMPO)
+                            ->first();
+
+                        PermisoSaldo::updateOrCreate(
+                            [
+                                'insamu_user_id' => $existenteComp ? $existenteComp->insamu_user_id : $userId,
                                 'anio' => $anio,
                                 'tipo_permiso' => PermisoSaldo::TIPO_COMPENSACION_TIEMPO,
                             ],
                             [
                                 'unidad' => PermisoSaldo::UNIDAD_HORAS,
                                 'dias_totales' => (float) $fila['horas_compensacion'],
+                                'dias_usados' => $existenteComp ? (float) $existenteComp->dias_usados : 0.0,
                             ]
                         );
                     }
@@ -225,24 +298,18 @@ class RrhhSaldoController extends Controller
             'insamu_rrhh_user_id' => 'required|string|max:64',
         ]);
 
-        $userId = $validados['insamu_user_id'];
+        $userId = trim((string) $validados['insamu_user_id']);
         $anio = (int) $validados['anio'];
         $horas = (float) $validados['horas'];
         $rrhhId = $validados['insamu_rrhh_user_id'];
         $motivo = $validados['motivo'] ?? 'Abono mensual de horas extraordinarias';
 
         $saldo = DB::transaction(function () use ($userId, $anio, $horas, $rrhhId, $motivo) {
-            $saldoActual = PermisoSaldo::firstOrCreate(
-                [
-                    'insamu_user_id' => $userId,
-                    'anio' => $anio,
-                    'tipo_permiso' => PermisoSaldo::TIPO_COMPENSACION_TIEMPO,
-                ],
-                [
-                    'unidad' => PermisoSaldo::UNIDAD_HORAS,
-                    'dias_totales' => 0.0,
-                    'dias_usados' => 0.0,
-                ]
+            $saldoActual = PermisoSaldo::obtenerOCrear(
+                $userId,
+                $anio,
+                PermisoSaldo::TIPO_COMPENSACION_TIEMPO,
+                0.0
             );
 
             // Operación transaccional: Sumar al acumulado existente
@@ -279,8 +346,30 @@ class RrhhSaldoController extends Controller
      */
     public function verificarSaldo(Request $request, string $userId): JsonResponse
     {
+        $userIdNorm = strtolower(trim($userId));
         $anio = (int) $request->query('anio', now()->year);
-        $tipoInput = $request->query('tipo_permiso', 'administrativo');
+        $mes = (int) $request->query('mes', now()->month);
+        $tipoInput = (string) $request->query('tipo_permiso', 'administrativo');
+
+        // Caso especial: Permiso Sin Goce de Remuneraciones (tope 30 días mensuales / 90 días anuales)
+        if (PermisoService::esSinGoce($tipoInput)) {
+            $usoSinGoce = PermisoService::calcularUsoSinGoce($userIdNorm, $anio, $mes);
+
+            return response()->json([
+                'status' => 'success',
+                'data' => array_merge([
+                    'configurado' => true,
+                    'requiere_saldo' => true,
+                    'tipo_permiso' => 'sin_goce',
+                    'anio' => $anio,
+                    'unidad' => PermisoSaldo::UNIDAD_DIAS,
+                    'cantidad_disponible' => min($usoSinGoce['dias_mes_disponibles'], $usoSinGoce['dias_anio_disponibles']),
+                    'bloqueo_preventivo' => false,
+                    'mensaje' => null,
+                ], $usoSinGoce),
+            ]);
+        }
+
         $tipo = PermisoSaldo::normalizarTipoPermiso($tipoInput);
 
         // Si es un permiso no contabilizable (ej. Duelo, Maternidad)
@@ -298,14 +387,15 @@ class RrhhSaldoController extends Controller
             ]);
         }
 
-        $saldo = PermisoSaldo::where('insamu_user_id', $userId)
+        $saldo = PermisoSaldo::query()
+            ->whereRaw('LOWER(insamu_user_id) = ?', [$userIdNorm])
             ->where('anio', $anio)
             ->where('tipo_permiso', $tipo)
             ->first();
 
         // Automatización 1 de enero: Los días administrativos siempre se habilitan automáticamente a 6 días
         if (! $saldo && $tipo === PermisoSaldo::TIPO_ADMINISTRATIVO) {
-            $saldo = PermisoSaldo::obtenerOCrear($userId, $anio, PermisoSaldo::TIPO_ADMINISTRATIVO, 6.0);
+            $saldo = PermisoSaldo::obtenerOCrear($userIdNorm, $anio, PermisoSaldo::TIPO_ADMINISTRATIVO, 6.0);
         }
 
         if (! $saldo) {
