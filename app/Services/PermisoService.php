@@ -139,6 +139,17 @@ class PermisoService
         $unidad = ($tipoSaldo === PermisoSaldo::TIPO_COMPENSACION_TIEMPO) ? 'horas' : 'días';
         $jornada = (string) ($datos['jornada'] ?? ($diasSolicitados == 0.5 ? 'Mañana' : (! empty($horasSolicitadas) ? 'Horas' : 'Completa')));
 
+        $fechasSeleccionadas = $this->normalizarFechasSeleccionadas($datos['fechas_seleccionadas'] ?? null);
+        if (! empty($fechasSeleccionadas)) {
+            $datos['fechas_seleccionadas'] = $fechasSeleccionadas;
+            $datos['fecha_inicio'] = $fechasSeleccionadas[0];
+            $datos['fecha_fin'] = $fechasSeleccionadas[count($fechasSeleccionadas) - 1];
+            $fechaInicio = Carbon::parse($datos['fecha_inicio']);
+            $fechaFin = Carbon::parse($datos['fecha_fin']);
+            $anio = $fechaInicio->year;
+            $mes = $fechaInicio->month;
+        }
+
         // Validar que no existan solapamientos incompatibles con solicitudes activas previas
         $this->validarSolapamientoFechas(
             $userId,
@@ -149,7 +160,8 @@ class PermisoService
             $diasSolicitados,
             $horasSolicitadas,
             $datos['hora_desde'] ?? null,
-            $datos['hora_hasta'] ?? null
+            $datos['hora_hasta'] ?? null,
+            ! empty($fechasSeleccionadas) ? $fechasSeleccionadas : null
         );
 
         return DB::transaction(function () use ($datos, $userId, $anio, $mes, $tipoSaldo, $esSinGoce, $diasSolicitados, $horasSolicitadas, $cantidadADescontar, $unidad) {
@@ -261,6 +273,7 @@ class PermisoService
                 'tipo_permiso' => $datos['tipo_permiso'] ?? 'Permiso Administrativo',
                 'fecha_inicio' => $datos['fecha_inicio'],
                 'fecha_fin' => $datos['fecha_fin'],
+                'fechas_seleccionadas' => ! empty($datos['fechas_seleccionadas']) ? $datos['fechas_seleccionadas'] : null,
                 'dias_solicitados' => $diasSolicitados,
                 'horas_solicitadas' => $horasSolicitadas,
                 'jornada' => $datos['jornada'] ?? ($diasSolicitados == 0.5 ? 'Mañana' : 'Completa'),
@@ -322,6 +335,7 @@ class PermisoService
                     'jornada' => $solicitud->jornada,
                     'fecha_inicio' => $solicitud->fecha_inicio,
                     'fecha_fin' => $solicitud->fecha_fin,
+                    'fechas_seleccionadas' => $solicitud->fechas_seleccionadas,
                     'visador_inicial_id' => $primeraFirma?->insamu_visador_id,
                     'total_visadores' => $tieneCircuitoExplicito ? count($visadoresCircuit) : 1,
                     'token_correo' => $primeraFirma?->token_correo,
@@ -1049,6 +1063,9 @@ class PermisoService
      * 3. Si ambas son media jornada y coinciden en el mismo turno (ej. Mañana con Mañana), se bloquea.
      * 4. Si ambas son compensaciones de horas en la misma fecha y sus rangos horarios se cruzan, se bloquea.
      */
+    /**
+     * @param  array<int, string>|null  $fechasSeleccionadas
+     */
     public function validarSolapamientoFechas(
         string $userId,
         ?string $rutSolicitante,
@@ -1058,7 +1075,8 @@ class PermisoService
         float $diasSolicitados,
         ?float $horasSolicitadas,
         ?string $horaDesde,
-        ?string $horaHasta
+        ?string $horaHasta,
+        ?array $fechasSeleccionadas = null
     ): void {
         $userIdLower = strtolower(trim($userId));
         $rutClean = strtolower(preg_replace('/[^0-9kK]/', '', (string) $rutSolicitante));
@@ -1089,21 +1107,21 @@ class PermisoService
         $esMediaJornadaNuevo = in_array($jornadaLower, ['mañana', 'tarde'], true) || ($diasSolicitados == 0.5 && ! $esHorasNuevo);
         $esDiaCompletoNuevo = ! $esHorasNuevo && ! $esMediaJornadaNuevo;
 
-        $inicioNuevo = Carbon::parse($fechaInicioStr);
-        $finNuevo = Carbon::parse($fechaFinStr);
+        $fechasNuevas = $this->expandirFechasSolicitud($fechaInicioStr, $fechaFinStr, $fechasSeleccionadas);
 
         foreach ($solicitudes as $existente) {
-            $inicioExistente = Carbon::parse($existente->fecha_inicio);
-            $finExistente = Carbon::parse($existente->fecha_fin);
+            $fechasExistentes = $this->expandirFechasSolicitud(
+                Carbon::parse($existente->fecha_inicio)->format('Y-m-d'),
+                Carbon::parse($existente->fecha_fin)->format('Y-m-d'),
+                is_array($existente->fechas_seleccionadas) ? $existente->fechas_seleccionadas : null
+            );
 
-            $maxInicio = $inicioNuevo->greaterThan($inicioExistente) ? $inicioNuevo->copy() : $inicioExistente->copy();
-            $minFin = $finNuevo->lessThan($finExistente) ? $finNuevo->copy() : $finExistente->copy();
-
-            if ($maxInicio->greaterThan($minFin)) {
+            $coincidencias = array_values(array_intersect($fechasNuevas, $fechasExistentes));
+            if (empty($coincidencias)) {
                 continue;
             }
 
-            $diaSolapado = $maxInicio->format('d/m/Y');
+            $diaSolapado = Carbon::parse($coincidencias[0])->format('d/m/Y');
 
             $jornadaExistLower = strtolower(trim((string) $existente->jornada));
             $esHorasExistente = ! empty($existente->horas_solicitadas) || ($jornadaExistLower === 'horas');
@@ -1159,5 +1177,58 @@ class PermisoService
                 }
             }
         }
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    protected function normalizarFechasSeleccionadas(mixed $raw): array
+    {
+        if (is_string($raw)) {
+            $decoded = json_decode($raw, true);
+            $raw = is_array($decoded) ? $decoded : [];
+        }
+        if (! is_array($raw)) {
+            return [];
+        }
+
+        $dates = [];
+        foreach ($raw as $item) {
+            $str = trim((string) $item);
+            if ($str !== '' && preg_match('/^\d{4}-\d{2}-\d{2}$/', $str)) {
+                $dates[] = $str;
+            }
+        }
+        $dates = array_values(array_unique($dates));
+        sort($dates);
+
+        return $dates;
+    }
+
+    /**
+     * @param  array<int, string>|null  $fechasSeleccionadas
+     * @return array<int, string>
+     */
+    protected function expandirFechasSolicitud(string $fechaInicioStr, string $fechaFinStr, ?array $fechasSeleccionadas = null): array
+    {
+        $normalizadas = $this->normalizarFechasSeleccionadas($fechasSeleccionadas);
+        if (! empty($normalizadas)) {
+            return $normalizadas;
+        }
+
+        $inicio = Carbon::parse($fechaInicioStr)->startOfDay();
+        $fin = Carbon::parse($fechaFinStr)->startOfDay();
+        if ($fin->lessThan($inicio)) {
+            return [$inicio->format('Y-m-d')];
+        }
+
+        $dates = [];
+        $cursor = $inicio->copy();
+        for ($i = 0; $i < 366 && $cursor->lessThanOrEqualTo($fin); $i++) {
+            $dates[] = $cursor->format('Y-m-d');
+            $cursor->addDay();
+        }
+
+        return $dates;
     }
 }

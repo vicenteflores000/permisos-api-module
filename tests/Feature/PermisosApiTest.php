@@ -1851,4 +1851,63 @@ class PermisosApiTest extends TestCase
         ]);
         $resRecreado->assertStatus(201);
     }
+
+    public function test_fechas_seleccionadas_discontinuas_y_solapamiento_exacto(): void
+    {
+        $userId = 'USR_CALENDARIO_DISCONTINUO';
+        PermisoSaldo::create([
+            'insamu_user_id' => $userId,
+            'anio' => 2026,
+            'tipo_permiso' => PermisoSaldo::TIPO_ADMINISTRATIVO,
+            'dias_totales' => 6.0,
+            'dias_usados' => 0.0,
+        ]);
+
+        // Pedir Viernes (2026-12-04) y Lunes (2026-12-07) sin incluir sábado/domingo
+        $resCreate = $this->withHeaders($this->headers())->postJson('/api/permisos', [
+            'insamu_user_id' => $userId,
+            'tipo_permiso' => 'Permiso Administrativo',
+            'fechas_seleccionadas' => ['2026-12-07', '2026-12-04'],
+            'jornada' => 'Completa',
+            'motivo' => 'Viernes y lunes desde calendario',
+            'insamu_visador_id' => 'jefe@salud.cl',
+        ]);
+
+        $resCreate->assertStatus(201)
+            ->assertJsonPath('data.fecha_inicio', '2026-12-04')
+            ->assertJsonPath('data.fecha_fin', '2026-12-07')
+            ->assertJsonPath('data.dias_solicitados', 2)
+            ->assertJsonPath('data.fechas_seleccionadas.0', '2026-12-04')
+            ->assertJsonPath('data.fechas_seleccionadas.1', '2026-12-07');
+
+        $solicitud = PermisoSolicitud::findOrFail($resCreate->json('data.id'));
+        $htmlPdf = view('pdf.permiso', ['solicitud' => $solicitud])->render();
+        $this->assertStringContainsString('04/12/2026, 07/12/2026', $htmlPdf);
+
+        // Descontó exactamente 2 días del saldo
+        $saldo = PermisoSaldo::where('insamu_user_id', $userId)->where('anio', 2026)->first();
+        $this->assertEquals(2.0, $saldo->dias_usados);
+
+        // Solicitar el Sábado 2026-12-05 (día no elegido entre medio) NO debe generar falso solapamiento
+        $resSabado = $this->withHeaders($this->headers())->postJson('/api/permisos', [
+            'insamu_user_id' => $userId,
+            'tipo_permiso' => 'Permiso Administrativo',
+            'fechas_seleccionadas' => ['2026-12-05'],
+            'jornada' => 'Completa',
+            'motivo' => 'Turno sábado',
+            'insamu_visador_id' => 'jefe@salud.cl',
+        ]);
+        $resSabado->assertStatus(201);
+
+        // Intentar pedir de nuevo Lunes 2026-12-07 SÍ debe bloquearse por solapamiento
+        $resDuplicado = $this->withHeaders($this->headers())->postJson('/api/permisos', [
+            'insamu_user_id' => $userId,
+            'tipo_permiso' => 'Permiso Administrativo',
+            'fechas_seleccionadas' => ['2026-12-07'],
+            'jornada' => 'Completa',
+            'motivo' => 'Repetido lunes',
+            'insamu_visador_id' => 'jefe@salud.cl',
+        ]);
+        $resDuplicado->assertStatus(422);
+    }
 }

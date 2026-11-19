@@ -37,6 +37,7 @@ class PermisoSolicitud extends Model
         'tipo_permiso',
         'fecha_inicio',
         'fecha_fin',
+        'fechas_seleccionadas',
         'dias_solicitados',
         'horas_solicitadas',
         'jornada',
@@ -63,6 +64,7 @@ class PermisoSolicitud extends Model
     protected $casts = [
         'fecha_inicio' => 'date:Y-m-d',
         'fecha_fin' => 'date:Y-m-d',
+        'fechas_seleccionadas' => 'array',
         'fecha_decreto' => 'date:Y-m-d',
         'dias_solicitados' => 'float',
         'horas_solicitadas' => 'float',

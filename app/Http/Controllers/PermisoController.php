@@ -6,6 +6,7 @@ use App\Models\LogSistema;
 use App\Models\PermisoSolicitud;
 use App\Services\PdfService;
 use App\Services\PermisoService;
+use Carbon\Carbon;
 use Exception;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -104,6 +105,13 @@ class PermisoController extends Controller
             }
         }
 
+        if (is_string($request->input('fechas_seleccionadas'))) {
+            $decodedFechas = json_decode($request->input('fechas_seleccionadas'), true);
+            if (is_array($decodedFechas)) {
+                $request->merge(['fechas_seleccionadas' => $decodedFechas]);
+            }
+        }
+
         // Cálculo Simple de Fechas: Se descarta la integración de calendarios de feriados nacionales.
         // La API confía plenamente en la cantidad enviada por el frontend (dias_solicitados u horas_solicitadas)
         // y los descuenta linealmente del saldo del funcionario.
@@ -114,8 +122,10 @@ class PermisoController extends Controller
             'cargo_solicitante' => 'nullable|string|max:255',
             'unidad_solicitante' => 'nullable|string|max:255',
             'tipo_permiso' => 'required|string|max:100',
-            'fecha_inicio' => 'required|date',
-            'fecha_fin' => 'required|date|after_or_equal:fecha_inicio',
+            'fecha_inicio' => 'required_without:fechas_seleccionadas|nullable|date',
+            'fecha_fin' => 'required_without:fechas_seleccionadas|nullable|date|after_or_equal:fecha_inicio',
+            'fechas_seleccionadas' => 'nullable|array',
+            'fechas_seleccionadas.*' => 'date',
             'dias_solicitados' => 'nullable|numeric|min:0',
             'horas_solicitadas' => 'nullable|numeric|min:0.5',
             'jornada' => 'nullable|string|max:32',
@@ -156,6 +166,24 @@ class PermisoController extends Controller
             'archivo.mimes' => 'El archivo adjunto debe ser de formato PDF, JPG, PNG, DOC o DOCX.',
             'archivo.max' => 'El archivo adjunto no puede exceder los 10MB.',
         ]);
+
+        if (! empty($validados['fechas_seleccionadas']) && is_array($validados['fechas_seleccionadas'])) {
+            $fechasNorm = [];
+            foreach ($validados['fechas_seleccionadas'] as $rawFecha) {
+                $fechasNorm[] = Carbon::parse((string) $rawFecha)->format('Y-m-d');
+            }
+            $fechasNorm = array_values(array_unique($fechasNorm));
+            sort($fechasNorm);
+
+            if (! empty($fechasNorm)) {
+                $validados['fechas_seleccionadas'] = $fechasNorm;
+                $validados['fecha_inicio'] = $validados['fecha_inicio'] ?? $fechasNorm[0];
+                $validados['fecha_fin'] = $validados['fecha_fin'] ?? $fechasNorm[count($fechasNorm) - 1];
+                if (! isset($validados['dias_solicitados']) && empty($validados['horas_solicitadas'])) {
+                    $validados['dias_solicitados'] = (float) count($fechasNorm);
+                }
+            }
+        }
 
         if (empty($validados['dias_solicitados']) && empty($validados['horas_solicitadas'])) {
             throw ValidationException::withMessages([

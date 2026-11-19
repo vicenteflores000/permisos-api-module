@@ -222,6 +222,14 @@
             <th>Fecha Término</th>
             <td>{{ \Carbon\Carbon::parse($solicitud->fecha_fin)->format('d/m/Y') }}</td>
         </tr>
+        @if(!empty($solicitud->fechas_seleccionadas))
+        <tr>
+            <th>Días Puntuales</th>
+            <td colspan="3">
+                {{ implode(', ', array_map(fn ($d) => \Carbon\Carbon::parse($d)->format('d/m/Y'), (array) $solicitud->fechas_seleccionadas)) }}
+            </td>
+        </tr>
+        @endif
         @if($solicitud->motivo)
         <tr>
             <th>Motivo / Observaciones</th>
