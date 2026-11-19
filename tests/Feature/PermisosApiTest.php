@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\PermisoSaldo;
 use App\Models\PermisoSolicitud;
 use App\Models\PermisoTrazabilidadFirma;
+use Carbon\Carbon;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
@@ -1909,5 +1910,71 @@ class PermisosApiTest extends TestCase
             'insamu_visador_id' => 'jefe@salud.cl',
         ]);
         $resDuplicado->assertStatus(422);
+    }
+
+    public function test_ventana_apertura_y_fecha_minima_2027(): void
+    {
+        $userId = 'USR_VENTANA_2027';
+
+        config([
+            'insamu.submissions_open_from' => '2026-12-14',
+            'insamu.min_permit_date' => '2027-01-01',
+        ]);
+
+        try {
+            // 1. Antes del 14/12/2026 bloquea incluso fechas 2027
+            Carbon::setTestNow('2026-11-19 12:00:00');
+            $resAntes = $this->withHeaders($this->headers())->postJson('/api/permisos', [
+                'insamu_user_id' => $userId,
+                'tipo_permiso' => 'Permiso Administrativo',
+                'fechas_seleccionadas' => ['2027-01-04'],
+                'jornada' => 'Completa',
+                'motivo' => 'Solicitud previa a apertura',
+                'insamu_visador_id' => 'jefe@salud.cl',
+            ]);
+            $resAntes->assertStatus(422)->assertJsonValidationErrors(['fecha_inicio']);
+
+            // 2. El 14/12/2026 rechaza fechas 2026 y acepta fechas desde 2027-01-01
+            Carbon::setTestNow('2026-12-14 09:00:00');
+            $res2026 = $this->withHeaders($this->headers())->postJson('/api/permisos', [
+                'insamu_user_id' => $userId,
+                'tipo_permiso' => 'Permiso Administrativo',
+                'fechas_seleccionadas' => ['2026-12-21'],
+                'jornada' => 'Completa',
+                'motivo' => 'Permiso para diciembre 2026',
+                'insamu_visador_id' => 'jefe@salud.cl',
+            ]);
+            $res2026->assertStatus(422)->assertJsonValidationErrors(['fecha_inicio']);
+
+            $res2027 = $this->withHeaders($this->headers())->postJson('/api/permisos', [
+                'insamu_user_id' => $userId,
+                'tipo_permiso' => 'Permiso Administrativo',
+                'fechas_seleccionadas' => ['2027-01-04'],
+                'jornada' => 'Completa',
+                'motivo' => 'Permiso enero 2027',
+                'insamu_visador_id' => 'jefe@salud.cl',
+            ]);
+            $res2027->assertStatus(201)->assertJsonPath('data.fecha_inicio', '2027-01-04');
+
+            $saldo2027 = PermisoSaldo::where('insamu_user_id', $userId)
+                ->where('anio', 2027)
+                ->first();
+            $this->assertNotNull($saldo2027);
+            $this->assertEquals(1.0, (float) $saldo2027->dias_usados);
+
+            // 3. En 2027 opera normalmente
+            Carbon::setTestNow('2027-01-10 10:00:00');
+            $resEn2027 = $this->withHeaders($this->headers())->postJson('/api/permisos', [
+                'insamu_user_id' => $userId,
+                'tipo_permiso' => 'Permiso Administrativo',
+                'fechas_seleccionadas' => ['2027-01-15'],
+                'jornada' => 'Completa',
+                'motivo' => 'Solicitud regular en 2027',
+                'insamu_visador_id' => 'jefe@salud.cl',
+            ]);
+            $resEn2027->assertStatus(201)->assertJsonPath('data.fecha_inicio', '2027-01-15');
+        } finally {
+            Carbon::setTestNow();
+        }
     }
 }

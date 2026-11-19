@@ -33,5 +33,7 @@
         <env name="TELESCOPE_ENABLED" value="false"/>
         <env name="NIGHTWATCH_ENABLED" value="false"/>
         <env name="API_SECRET_KEY" value="test_api_secret_key_insamu"/>
+        <env name="PERMISOS_SUBMISSIONS_OPEN_FROM" value=""/>
+        <env name="PERMISOS_MIN_PERMIT_DATE" value=""/>
     </php>
 </phpunit>

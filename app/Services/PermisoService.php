@@ -95,8 +95,46 @@ class PermisoService
      */
     public function crearSolicitud(array $datos): PermisoSolicitud
     {
+        $fechasSeleccionadas = $this->normalizarFechasSeleccionadas($datos['fechas_seleccionadas'] ?? null);
+        if (! empty($fechasSeleccionadas)) {
+            $datos['fechas_seleccionadas'] = $fechasSeleccionadas;
+            $datos['fecha_inicio'] = $fechasSeleccionadas[0];
+            $datos['fecha_fin'] = $fechasSeleccionadas[count($fechasSeleccionadas) - 1];
+        }
+
         $fechaInicio = Carbon::parse($datos['fecha_inicio']);
         $fechaFin = Carbon::parse($datos['fecha_fin']);
+
+        $openFrom = trim((string) config('insamu.submissions_open_from', ''));
+        if ($openFrom !== '' && now()->format('Y-m-d') < $openFrom) {
+            $openFormatted = Carbon::parse($openFrom)->format('d/m/Y');
+
+            throw ValidationException::withMessages([
+                'fecha_inicio' => [
+                    "La recepción de solicitudes inicia el {$openFormatted}. Los permisos para este año deben tramitarse manualmente según el flujo actual.",
+                ],
+            ]);
+        }
+
+        $minPermitDate = trim((string) config('insamu.min_permit_date', ''));
+        if ($minPermitDate !== '') {
+            $fechasAValidar = ! empty($fechasSeleccionadas)
+                ? $fechasSeleccionadas
+                : [$fechaInicio->format('Y-m-d'), $fechaFin->format('Y-m-d')];
+
+            foreach ($fechasAValidar as $fechaAValidar) {
+                if ($fechaAValidar < $minPermitDate) {
+                    $minFormatted = Carbon::parse($minPermitDate)->format('d/m/Y');
+
+                    throw ValidationException::withMessages([
+                        'fecha_inicio' => [
+                            "Solo se reciben solicitudes con fecha desde el {$minFormatted} en adelante. Los permisos para este año deben tramitarse manualmente según el flujo actual.",
+                        ],
+                    ]);
+                }
+            }
+        }
+
         $anio = $fechaInicio->year;
         $mes = $fechaInicio->month;
         $userId = trim((string) $datos['insamu_user_id']);
@@ -138,17 +176,6 @@ class PermisoService
 
         $unidad = ($tipoSaldo === PermisoSaldo::TIPO_COMPENSACION_TIEMPO) ? 'horas' : 'días';
         $jornada = (string) ($datos['jornada'] ?? ($diasSolicitados == 0.5 ? 'Mañana' : (! empty($horasSolicitadas) ? 'Horas' : 'Completa')));
-
-        $fechasSeleccionadas = $this->normalizarFechasSeleccionadas($datos['fechas_seleccionadas'] ?? null);
-        if (! empty($fechasSeleccionadas)) {
-            $datos['fechas_seleccionadas'] = $fechasSeleccionadas;
-            $datos['fecha_inicio'] = $fechasSeleccionadas[0];
-            $datos['fecha_fin'] = $fechasSeleccionadas[count($fechasSeleccionadas) - 1];
-            $fechaInicio = Carbon::parse($datos['fecha_inicio']);
-            $fechaFin = Carbon::parse($datos['fecha_fin']);
-            $anio = $fechaInicio->year;
-            $mes = $fechaInicio->month;
-        }
 
         // Validar que no existan solapamientos incompatibles con solicitudes activas previas
         $this->validarSolapamientoFechas(

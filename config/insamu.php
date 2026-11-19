@@ -12,6 +12,8 @@ return [
     |
     */
     'api_secret_key' => env('API_SECRET_KEY', 'default_insamu_secret_change_me'),
+    'submissions_open_from' => env('PERMISOS_SUBMISSIONS_OPEN_FROM', '2026-12-14'),
+    'min_permit_date' => env('PERMISOS_MIN_PERMIT_DATE', '2027-01-01'),
 
     /*
     |--------------------------------------------------------------------------
